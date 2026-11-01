@@ -90,6 +90,9 @@ pub struct HandResult {
     pub k: usize,
     /// für den 3D-Druck aufbereitet (keine Spaltstriche, nur Flächen)
     pub print: bool,
+    /// Bild ist schon flach (Grafik ohne Foto/Muster): Linien, Fotobereiche
+    /// und Verläufe werden übersprungen, weil das direkte Nachzeichnen sauberer ist
+    pub flat: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1486,6 +1489,37 @@ pub fn mask_iou(mask: &[bool], mw: usize, mh: usize, polys: &[Vec<Pt>]) -> f64 {
 // ---------------------------------------------------------------------------
 // Ablauf
 
+/// Ist das Bild eine flache Grafik? (wenige Pixel mit leichten Helligkeitsänderungen –
+/// Fotos, Muster und Verläufe haben viele)
+pub fn is_flat(d: &[u8], w: usize, h: usize) -> bool {
+    if w < 3 || h < 3 {
+        return true;
+    }
+    let (mut busy, mut tot) = (0usize, 0usize);
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            let p = y * w + x;
+            if d[p * 4 + 3] < 128 {
+                continue;
+            }
+            tot += 1;
+            let g = (lum(d, p + 1) - lum(d, p)).abs() + (lum(d, p + w) - lum(d, p)).abs();
+            if g > 4.0 {
+                busy += 1;
+            }
+        }
+    }
+    tot > 0 && (busy as f64) < 0.15 * tot as f64
+}
+
+/// Schalter für ein flaches Bild: nur, was dort hilft.
+fn effective(h: &HandOpts, flat: bool) -> HandOpts {
+    if !flat {
+        return h.clone();
+    }
+    HandOpts { lines: false, photo: false, gradients: false, ..h.clone() }
+}
+
 /// Stufe A: Analysebild, Freistellen, feine Linien.
 /// `text_boxes`: Rechtecke erkannter Texte (Quellbild), dort keine Linien suchen.
 /// Danach kann die App für jede Textzeile [`analyze_text`] aufrufen.
@@ -1493,6 +1527,8 @@ pub fn prepare(doc: &mut Doc, o: &Opts, h: &HandOpts, text_boxes: &[[f64; 4]]) {
     doc.rasterize(o);
     let (w, hh, sc) = (doc.w, doc.h, doc.sc);
     let mut res = HandResult::default();
+    res.flat = is_flat(&doc.data, w, hh);
+    let h = &effective(h, res.flat);
     if h.bg_cut {
         cut_background(&mut doc.data, w, hh, h.bg_tol);
     }
@@ -1527,6 +1563,7 @@ pub fn prepare(doc: &mut Doc, o: &Opts, h: &HandOpts, text_boxes: &[[f64; 4]]) {
 /// Stufe B: Text und Linien übermalen, Fotobereiche beruhigen, Farben, Pfade,
 /// Text einsetzen, Verläufe. `k` = Farbanzahl (0 = automatisch, etwas reichlicher).
 pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]) {
+    let h = &effective(h, doc.hand.flat);
     let (w, hh, sc) = (doc.w, doc.h, doc.sc);
     let n = w * hh;
     let mut erase = std::mem::take(&mut doc.hand.erase);
@@ -1970,8 +2007,17 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
                 }
                 let half = comp.iter().map(|&p| din[p]).fold(0.0f32, f32::max).max(0.5);
                 let len = comp.len() as f32 / (2.0 * half);
+                // hängt das schmale Stück an einem dicken Teil derselben Farbe (z. B. dünner
+                // Bogen eines Buchstabens), gehört es zur Form und wird verbreitert
+                let attached = comp.iter().any(|&p| {
+                    let (x, y) = (p % w, p / w);
+                    [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)].iter().any(|(dx, dy)| {
+                        let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                        xx >= 0 && yy >= 0 && xx < w as i64 && yy < hh as i64 && keep[yy as usize * w + xx as usize]
+                    })
+                });
                 // durchsichtige Teile werden nie verbreitert (nur Löcher füllen)
-                if lab >= 0 && len >= 6.0 * rmin {
+                if lab >= 0 && (len >= 2.5 * rmin || (attached && len >= 1.2 * rmin)) {
                     thicken.push((comp.clone(), lab, (rmin - half + 0.7).max(0.0)));
                 }
                 for p in comp {
@@ -2038,7 +2084,7 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
     }
     // kleine Krümel (Inseln unter der Mindestfläche) mit der umgebenden Farbe füllen
     {
-        let amin = (12.0 * rmin * rmin).max(20.0) as usize;
+        let amin = (3.2 * rmin * rmin).max(6.0) as usize;
         let mut seen = vec![false; n];
         for st in 0..n {
             if seen[st] {
@@ -2114,9 +2160,87 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
     }
 }
 
+/// Farbanzahl einer flachen Grafik: alle deutlich verschiedenen Farben, die nicht
+/// nur als Kantenglättung vorkommen (auch kleine wie ein roter Streifen).
+fn flat_colors(doc: &Doc) -> Vec<[f64; 3]> {
+    let tot: usize = doc.q.cnt.iter().sum::<usize>().max(1);
+    let mut idx: Vec<usize> = (0..doc.q.pal.len()).collect();
+    idx.sort_by(|a, b| doc.q.cnt[*b].cmp(&doc.q.cnt[*a]));
+    let mut reps: Vec<[f64; 3]> = Vec::new();
+    for i in idx {
+        if (doc.q.cnt[i] as f64) < 0.0004 * tot as f64 {
+            continue;
+        }
+        let c = doc.q.pal[i].map(|v| v as f64);
+        if reps.iter().any(|r| cdist(*r, c) < 38.0) {
+            continue;
+        }
+        // Mischfarbe zweier vorhandener Farben (Kantenglättung)? dann weglassen
+        let mixed = reps.iter().enumerate().any(|(a, ra)| {
+            reps[a + 1..].iter().any(|rb| {
+                (1..10).any(|t| {
+                    let f = t as f64 / 10.0;
+                    cdist([0, 1, 2].map(|j| ra[j] * (1.0 - f) + rb[j] * f), c) < 14.0
+                })
+            })
+        });
+        if mixed && (doc.q.cnt[i] as f64) < 0.02 * tot as f64 {
+            continue;
+        }
+        reps.push(c);
+    }
+    if std::env::var_os("ZMN_DEBUG").is_some() {
+        eprintln!("    flache Grafik: {} Farben {:?}", reps.len(), reps.iter().map(|c| vector::hex(c.map(|v| v as u8))).collect::<Vec<_>>());
+    }
+    reps
+}
+
+/// Gruppen direkt aus den Grundfarben bilden: jeder Ton zur nächsten Grundfarbe.
+fn groups_from(doc: &mut Doc, reps: &[[f64; 3]]) {
+    let mut groups: Vec<vector::Group> = reps.iter().map(|r| vector::Group { src: Vec::new(), over: Some(r.map(|v| v.round() as u8)), transp: false }).collect();
+    for (i, c) in doc.q.pal.iter().enumerate() {
+        let c = c.map(|v| v as f64);
+        let mut gi = (0..reps.len()).min_by(|&a, &b| cdist(c, reps[a]).partial_cmp(&cdist(c, reps[b])).unwrap()).unwrap();
+        // Mischton der Kantenglättung zwischen zwei Grundfarben: zur näheren der beiden
+        // (sonst landet z. B. Dunkelgold zwischen Gold und Schwarz bei Rot)
+        if cdist(c, reps[gi]) > 10.0 {
+            let mut best: Option<(f64, usize)> = None;
+            for a in 0..reps.len() {
+                for b in a + 1..reps.len() {
+                    for t in 0..=20 {
+                        let f = t as f64 / 20.0;
+                        let m = [0, 1, 2].map(|j| reps[a][j] * (1.0 - f) + reps[b][j] * f);
+                        let d = cdist(m, c);
+                        if best.map(|x| d < x.0).unwrap_or(true) {
+                            best = Some((d, if f < 0.5 { a } else { b }));
+                        }
+                    }
+                }
+            }
+            if let Some((d, g)) = best {
+                if d < cdist(c, reps[gi]) * 0.7 {
+                    gi = g;
+                }
+            }
+        }
+        groups[gi].src.push(i);
+    }
+    groups.retain(|g| !g.src.is_empty());
+    doc.groups = groups;
+    doc.k = doc.groups.len();
+}
+
 /// Farbanzahl setzen (0 = automatisch, für Logos etwas reichlicher).
 fn set_colors(doc: &mut Doc, k: usize, merge: bool) {
-    let kk = if k == 0 { (doc.q.auto + 4).min(doc.q.pal.len()).max(1) } else { k };
+    if k == 0 && doc.hand.flat {
+        let reps = flat_colors(doc);
+        if !reps.is_empty() {
+            groups_from(doc, &reps);
+            doc.hand.k = doc.k;
+            return;
+        }
+    }
+    let kk = if k != 0 { k } else { (doc.q.auto + 4).min(doc.q.pal.len()).max(1) };
     doc.set_preset(kk);
     // mit Verläufen: nahe Schattierungen derselben Farbe zusammenlegen – der
     // Verlauf zeichnet die Schattierung dann weich nach statt in Streifen
@@ -2164,6 +2288,7 @@ fn add_texts_and_gradients(doc: &mut Doc, h: &HandOpts) {
 /// [`Doc::run`]: 0 = alles, 1 = Farben, 2 = Zuordnung, 3 = Pfade).
 /// Texterkennung und Schriftwahl werden wiederverwendet.
 pub fn refresh(doc: &mut Doc, o: &Opts, h: &HandOpts, k: usize, stage: u8) {
+    let h = &effective(h, doc.hand.flat);
     if stage == 0 {
         let ocr = std::mem::take(&mut doc.hand.ocr);
         let saved = std::mem::take(&mut doc.hand.saved);
