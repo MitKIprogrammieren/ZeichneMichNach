@@ -58,6 +58,11 @@ pub struct HandResult {
     pub orig: Vec<u8>,
     /// Pixel, die zu Text oder Linien gehören und übermalt werden
     pub erase: Vec<bool>,
+    /// erkannte Textzeilen und eingesetzte Schrift (für Neuberechnungen)
+    pub ocr: Vec<TextLine>,
+    pub saved: Vec<TextOut>,
+    /// tatsächlich verwendete Farbanzahl
+    pub k: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -419,6 +424,7 @@ fn seg_dist(p: Pt, a: Pt, b: Pt) -> f64 {
     ((p[0] - a[0] - t * dx).powi(2) + (p[1] - a[1] - t * dy).powi(2)).sqrt()
 }
 
+#[allow(dead_code)]
 fn rdp(a: &[Pt], eps: f64) -> Vec<Pt> {
     if a.len() < 3 {
         return a.to_vec();
@@ -473,11 +479,48 @@ fn fit_circle(p: &[Pt]) -> Option<(Pt, f64, f64)> {
     Some((c, r, err))
 }
 
-/// Feine helle oder dunkle Linien finden. Rückgabe: Linien (Analysepixel) und Maske zum Übermalen.
+/// Gerades Stück oder Kreisbogen aus dem Skelett.
+struct Piece {
+    pts: Vec<Pt>,
+    len: f64,
+    color: [f64; 3],
+    width: f64,
+}
+
+/// Gerade durch Punkte (Hauptachse). Rückgabe: Anfang, Ende (Projektion), mittlerer Abstand.
+fn fit_seg(p: &[Pt]) -> Option<(Pt, Pt, f64)> {
+    if p.len() < 2 {
+        return None;
+    }
+    let n = p.len() as f64;
+    let (mx, my) = (p.iter().map(|q| q[0]).sum::<f64>() / n, p.iter().map(|q| q[1]).sum::<f64>() / n);
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for q in p {
+        let (u, v) = (q[0] - mx, q[1] - my);
+        sxx += u * u;
+        syy += v * v;
+        sxy += u * v;
+    }
+    let ang = 0.5 * (2.0 * sxy).atan2(sxx - syy);
+    let d = [ang.cos(), ang.sin()];
+    let (mut t0, mut t1, mut err) = (f64::MAX, f64::MIN, 0.0);
+    for q in p {
+        let (u, v) = (q[0] - mx, q[1] - my);
+        let t = u * d[0] + v * d[1];
+        t0 = t0.min(t);
+        t1 = t1.max(t);
+        err += (u * -d[1] + v * d[0]).abs();
+    }
+    Some(([mx + d[0] * t0, my + d[1] * t0], [mx + d[0] * t1, my + d[1] * t1], err / n))
+}
+
+/// Feine helle oder dunkle Linien finden. Stücke derselben Geraden werden über
+/// Kreuzungen hinweg verbunden, Kreisbögen zu Kreisen ergänzt.
+/// Rückgabe: Linien (Analysepixel) und Maske zum Übermalen.
 pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (Vec<LineOut>, Vec<bool>) {
     let n = w * h;
-    let mut erase = vec![false; n];
     let mut lines = Vec::new();
+    let mut erase = vec![false; n];
     if n == 0 {
         return (lines, erase);
     }
@@ -486,6 +529,8 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
     let open = morph(&morph(&l, w, h, r, false), w, h, r, true);
     let close = morph(&morph(&l, w, h, r, true), w, h, r, false);
     let minlen = (w.min(h) as f64 * 0.05).max(30.0);
+    let s = sc.max(0.7);
+    let mut all_raw = vec![false; n];
     for bright in [true, false] {
         let mut m: Vec<bool> = (0..n)
             .map(|p| {
@@ -498,63 +543,235 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
             .collect();
         let raw = m.clone();
         thin(&mut m, w, h);
-        prune(&mut m, w, h, (9.0 * sc.max(0.7)) as usize);
+        prune(&mut m, w, h, (9.0 * s) as usize);
+        // Breite und Farbe je Kette
+        let mut segs: Vec<Piece> = Vec::new();
+        let mut arcs: Vec<Piece> = Vec::new();
         for ch in chains(&m, w, h) {
             let pts: Vec<Pt> = ch.iter().map(|&p| [(p % w) as f64 + 0.5, (p / w) as f64 + 0.5]).collect();
-            let len: f64 = pts.windows(2).map(|s| ((s[1][0] - s[0][0]).powi(2) + (s[1][1] - s[0][1]).powi(2)).sqrt()).sum();
-            if len < minlen {
+            let len: f64 = pts.windows(2).map(|q| ((q[1][0] - q[0][0]).powi(2) + (q[1][1] - q[0][1]).powi(2)).sqrt()).sum();
+            if len < 10.0 * s {
                 continue;
             }
-            let closed = ch.first() == ch.last();
-            let simple = rdp(&pts, 1.3 * sc.max(0.7));
-            let nseg = simple.len().saturating_sub(1).max(1);
-            let straightish = len / nseg as f64 >= 22.0 * sc.max(0.7);
-            let circ = fit_circle(&pts).filter(|c| c.2 < 1.1 * sc.max(0.7) && c.1 > w.min(h) as f64 * 0.025);
-            if !straightish && circ.is_none() {
-                continue;
-            }
-            // Breite: Maskenpixel in der Nähe der Kette / Länge
             let rr = r as i64 + 1;
             let mut near = std::collections::HashSet::new();
             let mut col = [0f64; 3];
             for &p in &ch {
                 let c = px(d, p);
                 for k in 0..3 {
-                    col[k] += c[k];
+                    col[k] += c[k] / ch.len() as f64;
                 }
                 let (x, y) = ((p % w) as i64, (p / w) as i64);
                 for dy in -rr..=rr {
                     for dx in -rr..=rr {
                         let (xx, yy) = (x + dx, y + dy);
-                        if xx >= 0 && yy >= 0 && xx < w as i64 && yy < h as i64 {
-                            let q = yy as usize * w + xx as usize;
-                            if raw[q] {
-                                near.insert(q);
-                            }
+                        if xx >= 0 && yy >= 0 && xx < w as i64 && yy < h as i64 && raw[yy as usize * w + xx as usize] {
+                            near.insert(yy as usize * w + xx as usize);
                         }
                     }
                 }
             }
             let width = (near.len() as f64 / len.max(1.0)).clamp(1.0, 2.0 * r as f64);
-            let cn = ch.len() as f64;
-            let color = [(col[0] / cn) as u8, (col[1] / cn) as u8, (col[2] / cn) as u8];
-            for q in near {
-                erase[q] = true;
+            // Kette gierig in Kreisbögen und gerade Stücke zerlegen (eine Kette kann
+            // über eine Kreuzung hinweg von einem Kreis in eine Gerade übergehen)
+            let np = pts.len();
+            let rmax = 0.5 * w.min(h) as f64;
+            let rmin = w.min(h) as f64 * 0.02;
+            let dbg = std::env::var_os("ZMN_DEBUG_LINES").is_some();
+            let mut i = 0;
+            while i + 3 < np {
+                let alen = |e: usize| pts[i..e].windows(2).map(|q| ((q[1][0] - q[0][0]).powi(2) + (q[1][1] - q[0][1]).powi(2)).sqrt()).sum::<f64>();
+                // längster Bogen ab i
+                let mut arc_end = i;
+                let mut j = i + 8;
+                while j <= np {
+                    let part = &pts[i..j];
+                    let ok = fit_circle(part).map(|c| c.2 < 0.9 * s && c.1 > rmin && c.1 < rmax).unwrap_or(false);
+                    let bowed = {
+                        let (a0, a1) = (part[0], part[part.len() - 1]);
+                        part.iter().map(|q| seg_dist(*q, a0, a1)).fold(0.0, f64::max) > 2.5 * s
+                    };
+                    if ok && bowed {
+                        arc_end = j;
+                    } else if !ok && (arc_end > i || j > i + 40) {
+                        break;
+                    }
+                    j += 3;
+                }
+                // längstes gerades Stück ab i
+                let mut seg_end = i;
+                let mut j2 = i + 4;
+                while j2 <= np {
+                    if fit_seg(&pts[i..j2]).map(|f| f.2 < 0.8 * s).unwrap_or(false) {
+                        seg_end = j2;
+                        j2 += 2;
+                    } else {
+                        break;
+                    }
+                }
+                if arc_end > seg_end + 4 && alen(arc_end) >= 18.0 * s {
+                    if dbg {
+                        eprintln!("  bogen {:?}", fit_circle(&pts[i..arc_end]).map(|c| (c.0[0].round(), c.0[1].round(), c.1.round())));
+                    }
+                    arcs.push(Piece { pts: pts[i..arc_end].to_vec(), len: alen(arc_end), color: col, width });
+                    i = arc_end - 1;
+                } else if seg_end > i + 3 {
+                    let l2 = alen(seg_end);
+                    if l2 >= 10.0 * s {
+                        segs.push(Piece { pts: pts[i..seg_end].to_vec(), len: l2, color: col, width });
+                    }
+                    i = seg_end - 1;
+                } else {
+                    i += 2;
+                }
             }
-            let out_pts = if let (Some((c, rad, _)), true) = (circ, closed) {
-                (0..72).map(|k| {
-                    let t = k as f64 / 72.0 * std::f64::consts::TAU;
+        }
+        // gerade Stücke auf derselben Geraden zusammenfassen
+        let mut used = vec![false; segs.len()];
+        let fits: Vec<Option<(Pt, Pt, f64)>> = segs.iter().map(|sg| fit_seg(&sg.pts)).collect();
+        for i in 0..segs.len() {
+            if used[i] || fits[i].is_none() {
+                continue;
+            }
+            used[i] = true;
+            let mut group = vec![i];
+            let mut grew = true;
+            while grew {
+                grew = false;
+                let mut pts: Vec<Pt> = group.iter().flat_map(|&g| segs[g].pts.iter().copied()).collect();
+                let (a, b, _) = fit_seg(&pts).unwrap();
+                let dl = ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt().max(1e-6);
+                let dir = [(b[0] - a[0]) / dl, (b[1] - a[1]) / dl];
+                for j in 0..segs.len() {
+                    if used[j] {
+                        continue;
+                    }
+                    let Some((c, e, _)) = fits[j] else { continue };
+                    let el = ((e[0] - c[0]).powi(2) + (e[1] - c[1]).powi(2)).sqrt().max(1e-6);
+                    let dj = [(e[0] - c[0]) / el, (e[1] - c[1]) / el];
+                    let cosang = (dir[0] * dj[0] + dir[1] * dj[1]).abs();
+                    if cosang < (3.0f64).to_radians().cos() {
+                        continue;
+                    }
+                    let off = |q: Pt| ((q[0] - a[0]) * -dir[1] + (q[1] - a[1]) * dir[0]).abs();
+                    if off(c) > 2.2 * s || off(e) > 2.2 * s {
+                        continue;
+                    }
+                    // Lücke entlang der Geraden
+                    let t = |q: Pt| (q[0] - a[0]) * dir[0] + (q[1] - a[1]) * dir[1];
+                    let (tc, te) = (t(c).min(t(e)), t(c).max(t(e)));
+                    let gap = if te < 0.0 { -te } else if tc > dl { tc - dl } else { 0.0 };
+                    if gap > 70.0 * s {
+                        continue;
+                    }
+                    used[j] = true;
+                    group.push(j);
+                    pts.extend(segs[j].pts.iter().copied());
+                    grew = true;
+                }
+            }
+            let pts: Vec<Pt> = group.iter().flat_map(|&g| segs[g].pts.iter().copied()).collect();
+            let total: f64 = group.iter().map(|&g| segs[g].len).sum();
+            if total < minlen {
+                continue;
+            }
+            let (a, b, err) = fit_seg(&pts).unwrap();
+            if err > 1.4 * s {
+                continue;
+            }
+            let k = group.len() as f64;
+            let width = group.iter().map(|&g| segs[g].width).sum::<f64>() / k;
+            let col = [0, 1, 2].map(|c| group.iter().map(|&g| segs[g].color[c]).sum::<f64>() / k);
+            lines.push(LineOut { pts: vec![a, b], closed: false, width, color: col.map(|v| v.round() as u8) });
+        }
+        // Kreisbögen mit gleichem Kreis zusammenfassen
+        let circs: Vec<Option<(Pt, f64, f64)>> = arcs.iter().map(|a| fit_circle(&a.pts)).collect();
+        let mut used = vec![false; arcs.len()];
+        for i in 0..arcs.len() {
+            let Some((c0, r0, _)) = circs[i] else { continue };
+            if used[i] {
+                continue;
+            }
+            used[i] = true;
+            let mut group = vec![i];
+            for j in i + 1..arcs.len() {
+                if let Some((c1, r1, _)) = circs[j] {
+                    if !used[j] && ((c1[0] - c0[0]).powi(2) + (c1[1] - c0[1]).powi(2)).sqrt() < 0.12 * r0 + 2.0 && (r1 - r0).abs() < 0.08 * r0 + 1.5 {
+                        used[j] = true;
+                        group.push(j);
+                    }
+                }
+            }
+            let pts: Vec<Pt> = group.iter().flat_map(|&g| arcs[g].pts.iter().copied()).collect();
+            let Some((c, rad, err)) = fit_circle(&pts) else { continue };
+            if err > 1.2 * s {
+                continue;
+            }
+            // abgedeckte Winkel (in 10°-Schritten)
+            let mut bins = [false; 36];
+            for q in &pts {
+                let a = (q[1] - c[1]).atan2(q[0] - c[0]);
+                let b = (((a + std::f64::consts::PI) / std::f64::consts::TAU * 36.0) as usize).min(35);
+                bins[b] = true;
+            }
+            let cover = bins.iter().filter(|&&b| b).count();
+            let total: f64 = group.iter().map(|&g| arcs[g].len).sum();
+            if total < minlen {
+                continue;
+            }
+            let k = group.len() as f64;
+            let width = group.iter().map(|&g| arcs[g].width).sum::<f64>() / k;
+            let col = [0, 1, 2].map(|cc| group.iter().map(|&g| arcs[g].color[cc]).sum::<f64>() / k).map(|v| v.round() as u8);
+            if cover >= 22 {
+                // ganzer Kreis
+                let pts: Vec<Pt> = (0..96).map(|kk| {
+                    let t = kk as f64 / 96.0 * std::f64::consts::TAU;
                     [c[0] + rad * t.cos(), c[1] + rad * t.sin()]
-                }).collect()
-            } else if straightish {
-                simple
+                }).collect();
+                lines.push(LineOut { pts, closed: true, width, color: col });
             } else {
-                rdp(&pts, 0.6)
-            };
-            lines.push(LineOut { pts: out_pts, closed: closed && circ.is_some(), width, color });
+                // Bogen über die abgedeckten Winkel (größter zusammenhängender Bereich)
+                let mut best = (0usize, 0usize);
+                for st in 0..36 {
+                    if !bins[st] || bins[(st + 35) % 36] {
+                        continue;
+                    }
+                    let mut len = 0;
+                    while len < 36 && bins[(st + len) % 36] {
+                        len += 1;
+                    }
+                    if len > best.1 {
+                        best = (st, len);
+                    }
+                }
+                if best.1 == 0 {
+                    continue;
+                }
+                let a0 = -std::f64::consts::PI + best.0 as f64 / 36.0 * std::f64::consts::TAU;
+                let a1 = a0 + best.1 as f64 / 36.0 * std::f64::consts::TAU;
+                let steps = (best.1 * 3).max(6);
+                let pts: Vec<Pt> = (0..=steps).map(|kk| {
+                    let t = a0 + (a1 - a0) * kk as f64 / steps as f64;
+                    [c[0] + rad * t.cos(), c[1] + rad * t.sin()]
+                }).collect();
+                lines.push(LineOut { pts, closed: false, width, color: col });
+            }
+        }
+        for p in 0..n {
+            if raw[p] {
+                all_raw[p] = true;
+            }
         }
     }
-    let erase = morph_mask(&erase, w, h, 1, true);
+    // übermalen: Linienpixel in der Nähe der gefundenen Linien
+    let mut cov = vec![0f32; n];
+    for ln in &lines {
+        stroke_line(&mut cov, w, h, &ln.pts, ln.closed, ln.width + 4.0 * s, 1);
+    }
+    let grown = morph_mask(&all_raw, w, h, 1, true);
+    for p in 0..n {
+        erase[p] = cov[p] > 0.0 && grown[p];
+    }
     (lines, erase)
 }
 
@@ -731,6 +948,7 @@ pub struct TextAnalysis {
 /// Fertige Schrift einer Zeile (Umrisse im Quellbild).
 #[derive(Clone, Debug)]
 pub struct TextOut {
+    pub line: TextLine,
     pub color: [u8; 3],
     pub shapes: Vec<Shape>,
     pub erase: Vec<usize>,
@@ -1135,6 +1353,11 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     inpaint(&mut doc.data, w, hh, &erase);
     if h.photo {
         doc.hand.photo = calm_photo(&mut doc.data, w, hh, sc);
+        // feine Muster (Waben, Raster) auch in ruhigen Flächen glätten,
+        // damit z. B. eine Goldfläche nicht in Farbstreifen zerfällt
+        let r = ((3.0 * sc).round() as usize).clamp(2, 5);
+        let f = vector::bilateral(&doc.data, w, hh, r, 30.0);
+        doc.data = vector::bilateral(&f, w, hh, r, 30.0);
     }
     // Vorlage für Verläufe: geglättetes Bild, unter dem Text aber die echte Schriftfarbe
     let mut orig = doc.data.clone();
@@ -1145,12 +1368,45 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     }
     doc.hand.orig = orig;
     doc.q = vector::quantize(&doc.data, w, hh);
-    let kk = if k == 0 { (doc.q.auto + 4).min(doc.q.pal.len()).max(1) } else { k };
-    doc.set_preset(kk);
+    set_colors(doc, k, h.gradients);
     doc.apply_map(o);
     doc.vectorize(o);
+    doc.hand.saved = texts.to_vec();
+    add_texts_and_gradients(doc, h);
+}
+
+/// Farbanzahl setzen (0 = automatisch, für Logos etwas reichlicher).
+fn set_colors(doc: &mut Doc, k: usize, merge: bool) {
+    let kk = if k == 0 { (doc.q.auto + 4).min(doc.q.pal.len()).max(1) } else { k };
+    doc.set_preset(kk);
+    // mit Verläufen: nahe Schattierungen derselben Farbe zusammenlegen – der
+    // Verlauf zeichnet die Schattierung dann weich nach statt in Streifen
+    if merge && k == 0 {
+        loop {
+            let cols: Vec<[f64; 3]> = (0..doc.groups.len()).map(|i| doc.gcol(i).map(|v| v as f64)).collect();
+            let mut best: Option<(f64, usize, usize)> = None;
+            for a in 0..cols.len() {
+                for b in a + 1..cols.len() {
+                    let dd = cdist(cols[a], cols[b]);
+                    if dd < 36.0 && best.map(|x| dd < x.0).unwrap_or(true) {
+                        best = Some((dd, a, b));
+                    }
+                }
+            }
+            let Some((_, a, b)) = best else { break };
+            let src = std::mem::take(&mut doc.groups[b].src);
+            doc.groups[a].src.extend(src);
+            doc.groups.remove(b);
+        }
+        doc.k = doc.groups.len();
+    }
+    doc.hand.k = doc.k;
+}
+
+fn add_texts_and_gradients(doc: &mut Doc, h: &HandOpts) {
+    let texts = doc.hand.saved.clone();
     let mut ntext = 0;
-    for t in texts {
+    for t in &texts {
         if t.shapes.is_empty() {
             continue;
         }
@@ -1163,7 +1419,41 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     if h.gradients {
         find_gradients(doc);
     }
-    doc.hand.orig = Vec::new();
+}
+
+/// Nach einer Änderung in der Oberfläche neu berechnen (Stufe wie bei
+/// [`Doc::run`]: 0 = alles, 1 = Farben, 2 = Zuordnung, 3 = Pfade).
+/// Texterkennung und Schriftwahl werden wiederverwendet.
+pub fn refresh(doc: &mut Doc, o: &Opts, h: &HandOpts, k: usize, stage: u8) {
+    if stage == 0 {
+        let ocr = std::mem::take(&mut doc.hand.ocr);
+        let saved = std::mem::take(&mut doc.hand.saved);
+        let boxes: Vec<[f64; 4]> = ocr.iter().map(|l| l.bbox).collect();
+        prepare(doc, o, h, &boxes);
+        let texts: Vec<TextOut> = if h.text {
+            saved
+                .into_iter()
+                .map(|mut t| {
+                    t.erase = analyze_text(doc, &t.line).map(|a| a.erase).unwrap_or_default();
+                    t
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        finish(doc, o, k, h, &texts);
+        doc.hand.ocr = ocr;
+        return;
+    }
+    if stage <= 1 {
+        doc.q = vector::quantize(&doc.data, doc.w, doc.h);
+        set_colors(doc, k, h.gradients);
+    }
+    if stage <= 2 {
+        doc.apply_map(o);
+    }
+    doc.vectorize(o);
+    add_texts_and_gradients(doc, h);
 }
 
 /// Passende Farbgruppe für eine Farbe (oder neue Gruppe mit fester Farbe).

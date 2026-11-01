@@ -49,6 +49,7 @@ pub fn run(doc: &mut Doc, path: Option<&Path>, o: &Opts, h: &HandOpts, k: usize,
     }
     progress("Nachzeichnen …", 0.75);
     hand::finish(doc, o, k, h, &texts);
+    doc.hand.ocr = lines;
     info.secs = t0.elapsed().as_secs_f64();
     progress("Fertig", 1.0);
     info

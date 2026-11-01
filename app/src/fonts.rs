@@ -581,7 +581,7 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
                 }
             }
         }
-        outs.push(TextOut { color: l.fg, shapes, erase: l.erase.clone() });
+        outs.push(TextOut { line: l.line.clone(), color: l.fg, shapes, erase: l.erase.clone() });
         matches.push(Match { text: l.line.text.clone(), family: fam, styles, score: val });
     }
     (outs, matches)
