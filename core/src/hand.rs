@@ -27,6 +27,8 @@ pub struct HandOpts {
     pub print_min_mm: f64,
     /// höchstens so viele Farben (AMS)
     pub print_colors: usize,
+    /// Fotobereiche im Druck: 0 = eine Farbe, 1 = ruhige Stufen, 2 = so lassen
+    pub print_photo: u8,
 }
 
 impl Default for HandOpts {
@@ -42,6 +44,7 @@ impl Default for HandOpts {
             print_width_mm: 100.0,
             print_min_mm: 0.8,
             print_colors: 4,
+            print_photo: 0,
         }
     }
 }
@@ -817,10 +820,10 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
 
 /// Unruhige, großflächige Bereiche (Fotos, Muster) finden und kantenerhaltend glätten.
 /// Rückgabe: Anteil der Fotobereiche.
-pub fn calm_photo(d: &mut Vec<u8>, w: usize, h: usize, sc: f64) -> f64 {
+pub fn calm_photo(d: &mut Vec<u8>, w: usize, h: usize, sc: f64) -> (f64, Vec<bool>) {
     let n = w * h;
     if n == 0 {
-        return 0.0;
+        return (0.0, Vec::new());
     }
     let l: Vec<f64> = (0..n).map(|p| lum(d, p)).collect();
     // Kantenpixel
@@ -858,7 +861,7 @@ pub fn calm_photo(d: &mut Vec<u8>, w: usize, h: usize, sc: f64) -> f64 {
     let busy = morph_mask(&morph_mask(&busy, w, h, k, false), w, h, k + 2, true);
     let frac = busy.iter().filter(|&&b| b).count() as f64 / n as f64;
     if frac < 0.01 {
-        return 0.0;
+        return (0.0, Vec::new());
     }
     // innerhalb der Fotobereiche stark weichzeichnen (nur Fotopixel mitteln,
     // damit nichts vom Motiv hineinblutet) – es bleiben weiche Verläufe
@@ -886,7 +889,46 @@ pub fn calm_photo(d: &mut Vec<u8>, w: usize, h: usize, sc: f64) -> f64 {
         }
     }
     *d = cur;
-    frac
+    (frac, busy)
+}
+
+/// Fotobereiche für den Druck vereinfachen: 0 = eine Farbe, 1 = drei ruhige Stufen.
+fn simplify_photo(d: &mut [u8], busy: &[bool], mode: u8) {
+    let idx: Vec<usize> = (0..busy.len()).filter(|&p| busy[p] && d[p * 4 + 3] >= 128).collect();
+    if idx.is_empty() {
+        return;
+    }
+    let med = |ps: &[usize]| -> [u8; 3] {
+        let mut c = [0u8; 3];
+        for k in 0..3 {
+            let mut v: Vec<u8> = ps.iter().map(|&p| d[p * 4 + k]).collect();
+            v.sort_unstable();
+            c[k] = v[v.len() / 2];
+        }
+        c
+    };
+    if mode == 0 {
+        let c = med(&idx);
+        for &p in &idx {
+            d[p * 4..p * 4 + 3].copy_from_slice(&c);
+        }
+        return;
+    }
+    // drei Helligkeitsstufen (Drittel nach Helligkeit), je Stufe der Mittelton
+    let mut by_l: Vec<(f64, usize)> = idx.iter().map(|&p| (lum(d, p), p)).collect();
+    by_l.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let third = by_l.len() / 3;
+    let bands: Vec<Vec<usize>> = vec![
+        by_l[..third].iter().map(|x| x.1).collect(),
+        by_l[third..2 * third].iter().map(|x| x.1).collect(),
+        by_l[2 * third..].iter().map(|x| x.1).collect(),
+    ];
+    let cols: Vec<[u8; 3]> = bands.iter().map(|b| if b.is_empty() { [0, 0, 0] } else { med(b) }).collect();
+    for (bi, b) in bands.iter().enumerate() {
+        for &p in b {
+            d[p * 4..p * 4 + 3].copy_from_slice(&cols[bi]);
+        }
+    }
 }
 
 /// Kastenfilter (trennbar, Summen über gleitendes Fenster).
@@ -1389,7 +1431,11 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     let before = doc.data.clone();
     inpaint(&mut doc.data, w, hh, &erase);
     if h.photo {
-        doc.hand.photo = calm_photo(&mut doc.data, w, hh, sc);
+        let (frac, busy) = calm_photo(&mut doc.data, w, hh, sc);
+        doc.hand.photo = frac;
+        if h.print && h.print_photo < 2 && busy.len() == n {
+            simplify_photo(&mut doc.data, &busy, h.print_photo);
+        }
         // feine Muster (Waben, Raster) auch in ruhigen Flächen glätten,
         // damit z. B. eine Goldfläche nicht in Farbstreifen zerfällt
         let r = ((3.0 * sc).round() as usize).clamp(2, 5);
@@ -1414,7 +1460,30 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
 fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
     doc.hand.print = h.print;
     if h.print {
-        limit_colors(doc, h.print_colors);
+        // Farben von Schrift und Linien müssen erhalten bleiben (z. B. weiße Schrift,
+        // auch wenn Weiß sonst kaum vorkommt)
+        let mut need: Vec<[u8; 3]> = doc.hand.saved.iter().filter(|t| !t.shapes.is_empty()).map(|t| t.color).collect();
+        // Linienfarben bündeln (ähnliche Töne zählen als eine Farbe)
+        for l in &doc.hand.lines {
+            let cf = l.color.map(|v| v as f64);
+            if !need.iter().any(|c| cdist(c.map(|v| v as f64), cf) < 45.0) {
+                need.push(l.color);
+            }
+        }
+        let mut keep: Vec<usize> = Vec::new();
+        for c in need {
+            let gi = nearest_group_ex(doc, c, true);
+            if !keep.contains(&gi) {
+                keep.push(gi);
+            }
+        }
+        if std::env::var_os("ZMN_DEBUG").is_some() {
+            eprintln!("    Farben vorher: {:?}, Pflicht {:?}", (0..doc.groups.len()).map(|i| vector::hex(doc.gcol(i))).collect::<Vec<_>>(), keep);
+        }
+        limit_colors(doc, h.print_colors, &keep);
+        if std::env::var_os("ZMN_DEBUG").is_some() {
+            eprintln!("    Farben nachher: {:?}", (0..doc.groups.len()).map(|i| vector::hex(doc.gcol(i))).collect::<Vec<_>>());
+        }
     }
     doc.apply_map(o);
     if h.print {
@@ -1431,8 +1500,9 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
 
 /// Farbanzahl auf höchstens n begrenzen: ähnlichste Gruppen zusammenlegen
 /// (kleine Gruppen zuerst, gewichtet nach Fläche).
-fn limit_colors(doc: &mut Doc, n: usize) {
+fn limit_colors(doc: &mut Doc, n: usize, keep: &[usize]) {
     let n = n.max(1);
+    let mut keep: Vec<usize> = keep.to_vec();
     loop {
         let live: Vec<usize> = (0..doc.groups.len()).filter(|&i| !doc.groups[i].transp).collect();
         if live.len() <= n {
@@ -1443,16 +1513,32 @@ fn limit_colors(doc: &mut Doc, n: usize) {
             for &b in &live[ia + 1..] {
                 let (ca, cb) = (doc.gcol(a).map(|v| v as f64), doc.gcol(b).map(|v| v as f64));
                 let wsmall = doc.group_weight(&doc.groups[a]).min(doc.group_weight(&doc.groups[b])) as f64;
-                let cost = cdist(ca, cb) * (wsmall + 1.0).sqrt();
+                // Pflichtfarben (Schrift, Linien) nur notfalls zusammenlegen – dann
+                // nach reinem Farbabstand, damit z. B. Weiß nicht wegen kleiner Fläche verschwindet
+                let nk = keep.contains(&a) as u8 + keep.contains(&b) as u8;
+                let cost = match nk {
+                    0 => cdist(ca, cb) * (wsmall + 1.0).powf(0.15),
+                    1 => cdist(ca, cb) * (wsmall + 1.0).powf(0.15),
+                    _ => 1e15 + cdist(ca, cb),
+                };
                 if best.map(|x| cost < x.0).unwrap_or(true) {
                     best = Some((cost, a, b));
                 }
             }
         }
-        let Some((_, a, b)) = best else { break };
+        let Some((_, mut a, mut b)) = best else { break };
+        // die Pflichtfarbe bleibt Ziel, damit ihr Farbton erhalten bleibt
+        if keep.contains(&b) && !keep.contains(&a) {
+            std::mem::swap(&mut a, &mut b);
+        }
+        // Pflichtfarbe behält ihren eigenen Farbton
+        if keep.contains(&a) && doc.groups[a].over.is_none() {
+            doc.groups[a].over = Some(doc.gcol(a));
+        }
         let src = std::mem::take(&mut doc.groups[b].src);
         doc.groups[a].src.extend(src);
         doc.groups.remove(b);
+        keep = keep.into_iter().filter(|&x| x != b).map(|x| if x > b { x - 1 } else { x }).collect();
     }
     doc.k = doc.groups.len();
 }
@@ -1598,7 +1684,19 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
         let polys: Vec<Vec<Pt>> = t.shapes.iter().flat_map(|sp| flatten(sp, 0.4)).map(|p| p.into_iter().map(|q| [q[0] * sc, q[1] * sc]).collect()).collect();
         let mut cov = vec![0f32; n];
         fill_evenodd(&mut cov, w, hh, &polys, 2);
-        let m2: Vec<bool> = cov.iter().map(|&v| v >= 0.5).collect();
+        let mask: Vec<bool> = cov.iter().map(|&v| v >= 0.5).collect();
+        // dünne Schrift so weit verstärken, dass sie die Mindestbreite hält
+        let mut m2 = mask.clone();
+        let mut grow = 0.0f32;
+        while grow < rmin + 1.0 {
+            let total = m2.iter().filter(|&&b| b).count().max(1);
+            let kept = open_round(&m2, w, hh, rmin).iter().filter(|&&b| b).count();
+            if kept as f64 >= 0.92 * total as f64 {
+                break;
+            }
+            grow += 0.5;
+            m2 = dilate_round(&mask, w, hh, grow);
+        }
         let gi = nearest_group_ex(doc, t.color, false) as i16;
         for p in 0..n {
             if m2[p] && doc.g[p] >= 0 {
@@ -1622,7 +1720,8 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
         for &lab in &labels {
             let m: Vec<bool> = doc.g.iter().map(|&v| v == lab).collect();
             let keep = open_round(&m, w, hh, rmin);
-            let rem: Vec<bool> = (0..n).map(|p| m[p] && !keep[p]).collect();
+            // eingebrannte Schrift und Linien werden nie entfernt
+            let rem: Vec<bool> = (0..n).map(|p| m[p] && !keep[p] && !protect[p]).collect();
             if !rem.iter().any(|&b| b) {
                 continue;
             }

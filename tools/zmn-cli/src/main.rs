@@ -35,6 +35,14 @@ fn main() {
                     i += 1;
                 }
             }
+            "--foto" => {
+                i += 1;
+                h.print_photo = match args[i].as_str() {
+                    "stufen" | "1" => 1,
+                    "lassen" | "2" => 2,
+                    _ => 0,
+                };
+            }
             "--grund" => {
                 i += 1;
                 b3.base_mm = args[i].replace(',', ".").parse().unwrap_or(1.6);
