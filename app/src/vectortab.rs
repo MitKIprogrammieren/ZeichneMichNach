@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 enum Menu {
     Main,
     Hand,
+    Print,
     Background,
     Palette,
     Regions,
@@ -37,6 +38,7 @@ enum Fmt {
     Eps,
     Png,
     Mf3,
+    Step,
 }
 
 impl Fmt {
@@ -48,6 +50,7 @@ impl Fmt {
             Fmt::Eps => "eps",
             Fmt::Png => "png",
             Fmt::Mf3 => "3mf",
+            Fmt::Step => "step",
         }
     }
 }
@@ -107,6 +110,13 @@ pub struct VectorTab {
     /// „Nachzeichnen wie von Hand“ an/aus und seine Schalter
     hand_on: bool,
     hand: HandOpts,
+    /// 3D-Aufbau für STEP/3MF (Grundschicht, Rand, Höhen)
+    b3: nz_core::relief::Build3d,
+    /// Düse für „Schmalste Stelle = 2 × Düse“
+    nozzle: f64,
+    /// eigene Filamentfarben statt automatischer Wahl
+    own_pal: bool,
+    pal_edit: Vec<[u8; 3]>,
 }
 
 impl Default for VectorTab {
@@ -135,6 +145,10 @@ impl Default for VectorTab {
             menu: Menu::Main,
             hand_on: true,
             hand: HandOpts::default(),
+            b3: nz_core::relief::Build3d { width_mm: 100.0, ..Default::default() },
+            nozzle: 0.4,
+            own_pal: false,
+            pal_edit: vec![[20, 20, 20], [212, 169, 64], [242, 239, 228], [186, 17, 45]],
         }
         .with_test_menu()
     }
@@ -143,8 +157,21 @@ impl Default for VectorTab {
 impl VectorTab {
     /// Für Bildschirmfotos im Test: Menü über ZMN_MENU=hand vorwählen.
     fn with_test_menu(mut self) -> Self {
-        if std::env::var("ZMN_MENU").as_deref() == Ok("hand") {
-            self.menu = Menu::Hand;
+        match std::env::var("ZMN_MENU").as_deref() {
+            Ok("hand") => self.menu = Menu::Hand,
+            Ok("druck") => {
+                self.menu = Menu::Print;
+                self.hand.print = true;
+                self.hand.print_width_mm = 200.0;
+                self.b3.width_mm = 200.0;
+                self.width_mm = 200.0;
+            }
+            _ => {}
+        }
+        if let Ok(f) = std::env::var("ZMN_FMT") {
+            if f == "step" {
+                self.fmt = Fmt::Step;
+            }
         }
         self
     }
@@ -481,6 +508,13 @@ impl VectorTab {
 
     fn export_opts(&self, d: &Doc) -> Opts {
         let mut o = self.o.clone();
+        if self.hand_on && self.hand.print {
+            // Druckmodus: SVG in der Druckbreite, damit die Mindestbreite stimmt
+            o.unit = Unit::Mm;
+            o.dpi = 96.0;
+            o.scale = (self.hand.print_width_mm * o.dpi / 25.4) / d.src_w.max(1) as f64;
+            return o;
+        }
         if self.mm {
             o.unit = Unit::Mm;
             o.dpi = 96.0;
@@ -522,8 +556,13 @@ impl VectorTab {
             Fmt::Dxf => d.build_dxf(&o).into_bytes(),
             Fmt::Png => d.build_png(&o),
             Fmt::Mf3 => {
-                let parts = d.build_3d(&self.o, self.width_mm, self.height_3d, self.base_3d);
+                let (parts, _) = nz_core::relief::build_parts(&d, &self.o, &self.b3);
                 nz_core::export3mf::write_3mf(&parts, &[stem.clone()], &nz_core::export3mf::ExportOpts::default())
+            }
+            Fmt::Step => {
+                let bodies = nz_core::relief::bodies(&d, &self.o, &self.b3);
+                let fname = out.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default();
+                nz_core::relief::step_from_bodies(&bodies, self.b3.width_mm, d.src_w, d.src_h, &stem, &fname).into_bytes()
             }
         };
         let mut s = self.sh.lock().unwrap();
@@ -685,6 +724,7 @@ impl VectorTab {
             Menu::Curves => "Kurven & Formen",
             Menu::Symmetry => "Symmetrie",
             Menu::Hand => "Nachzeichnen wie von Hand",
+            Menu::Print => "Für den 3D-Druck",
             Menu::Main => "",
         };
         ui.label(theme::strong(title, 20.0).color(t.text));
@@ -692,6 +732,10 @@ impl VectorTab {
         ui.add_space(8.0);
         if self.menu == Menu::Hand {
             self.hand_ui(ui, t, ctx, &d);
+            return;
+        }
+        if self.menu == Menu::Print {
+            self.print_ui(ui, t, ctx, &d);
             return;
         }
         if self.menu == Menu::Background {
@@ -899,8 +943,10 @@ impl VectorTab {
         ui.add_space(6.0);
         let bg = d.background_group().map(|g| d.groups[g].transp);
         let hand_badge = if self.hand_on { "an" } else { "aus" }.to_string();
-        let items: [(Menu, &str, &str, Option<String>); 7] = [
+        let print_badge = if self.hand_on && self.hand.print { format!("{} Farben · {:.0} mm", self.hand.print_colors, self.hand.print_width_mm) } else { "aus".to_string() };
+        let items: [(Menu, &str, &str, Option<String>); 8] = [
             (Menu::Hand, "Nachzeichnen wie von Hand", "Versteht das Bild: Text, feine Linien, Verläufe, Fotobereiche – alles lokal", Some(hand_badge)),
+            (Menu::Print, "Für den 3D-Druck", "Flache Farben, Farbanzahl fürs AMS, keine zu dünnen Stellen", Some(print_badge)),
             (Menu::Background, "Hintergrund", "Hintergrund entfernen oder als Fläche behalten", bg.map(|b| if b { "entfernt".to_string() } else { "behalten".to_string() })),
             (Menu::Palette, "Palette", "Anzahl der Farben, Farben ändern, zusammenlegen oder transparent machen", Some(d.groups.len().to_string())),
             (Menu::Regions, "Regionen", "Einzelne Flächen anklicken und umfärben, zusammenführen oder entfernen", if d.edits.is_empty() { None } else { Some(d.edits.len().to_string()) }),
@@ -1043,6 +1089,160 @@ impl VectorTab {
             } else {
                 self.retrace(ctx);
             }
+        }
+    }
+
+    /// Bereich „Für den 3D-Druck“
+    fn print_ui(&mut self, ui: &mut egui::Ui, t: &Tok, ctx: &egui::Context, d: &Doc) {
+        let mut h = self.hand.clone();
+        let mut commit = false;
+        // Zahlenfeld: übernehmen, wenn das Ziehen endet oder die Eingabe fertig ist
+        let num = |ui: &mut egui::Ui, v: &mut f64, range: std::ops::RangeInclusive<f64>, speed: f64, dec: usize, suffix: &str| -> bool {
+            let r = ui.add(egui::DragValue::new(v).range(range).speed(speed).fixed_decimals(dec).suffix(suffix));
+            r.drag_stopped() || r.lost_focus() || (r.changed() && !r.dragged() && !r.has_focus())
+        };
+        theme::card(ui, t, |ui| {
+            theme::row(ui, t, "Druckmodus", |ui| {
+                if theme::toggle(ui, t, &mut h.print).changed() {
+                    commit = true;
+                }
+            });
+            theme::hint(ui, t, "Druckbare Flächen: flache Farben, keine haarfeinen Stellen, Schrift und Linien werden verstärkt statt gelöscht.");
+        });
+        ui.add_space(6.0);
+        theme::card(ui, t, |ui| {
+            if !h.print {
+                ui.disable();
+            }
+            ui.spacing_mut().item_spacing.y = 8.0;
+            theme::row(ui, t, "Druckbreite", |ui| {
+                if num(ui, &mut h.print_width_mm, 10.0..=1000.0, 0.5, 0, " mm") {
+                    commit = true;
+                }
+            });
+            theme::row(ui, t, "Anzahl Farben", |ui| {
+                let mut k = h.print_colors as f64;
+                if num(ui, &mut k, 1.0..=16.0, 0.05, 0, "") {
+                    commit = true;
+                }
+                h.print_colors = k.round() as usize;
+            });
+            theme::row(ui, t, "Düse", |ui| {
+                let mut nz = self.nozzle;
+                if theme::segmented(ui, t, &mut nz, &[(0.2, "0,2"), (0.4, "0,4"), (0.6, "0,6"), (0.8, "0,8")], false) {
+                    self.nozzle = nz;
+                    h.print_min_mm = 2.0 * nz;
+                    commit = true;
+                }
+            });
+            theme::row(ui, t, "Schmalste Stelle", |ui| {
+                if num(ui, &mut h.print_min_mm, 0.2..=5.0, 0.01, 2, " mm") {
+                    commit = true;
+                }
+            });
+            theme::hint(ui, t, "Standard: 2 × Düse. Dünnere Striche werden auf diese Breite verstärkt.");
+            ui.label(RichText::new("Fotobereiche").color(t.text));
+            let mut ph = h.print_photo;
+            if theme::segmented(ui, t, &mut ph, &[(0u8, "Eine Farbe"), (1u8, "Ruhige Stufen"), (2u8, "So lassen")], true) {
+                h.print_photo = ph;
+                commit = true;
+            }
+        });
+        ui.add_space(6.0);
+        // eigene Filamentfarben
+        theme::card(ui, t, |ui| {
+            if !h.print {
+                ui.disable();
+            }
+            theme::row(ui, t, "Eigene Filamentfarben", |ui| {
+                if theme::toggle(ui, t, &mut self.own_pal).changed() {
+                    commit = true;
+                }
+            });
+            if self.own_pal {
+                theme::hint(ui, t, "Alles wird genau auf diese Farben abgebildet (z. B. deine AMS-Spulen).");
+                let mut del = None;
+                for (i, c) in self.pal_edit.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("A{}", i + 1)).color(t.muted));
+                        if ui.color_edit_button_srgb(c).changed() {
+                            commit = true;
+                        }
+                        ui.label(RichText::new(theme::color_name(*c)).color(t.text));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.small_button("✕").clicked() {
+                                del = Some(i);
+                            }
+                        });
+                    });
+                }
+                if let Some(i) = del {
+                    if self.pal_edit.len() > 1 {
+                        self.pal_edit.remove(i);
+                        commit = true;
+                    }
+                }
+                if self.pal_edit.len() < 16 && ui.add(egui::Button::new(RichText::new("+ Farbe").color(t.accent)).frame(false)).clicked() {
+                    self.pal_edit.push([128, 128, 128]);
+                    commit = true;
+                }
+            }
+        });
+        h.print_palette = if self.own_pal { self.pal_edit.clone() } else { Vec::new() };
+        if h.print {
+            ui.add_space(6.0);
+            theme::card(ui, t, |ui| {
+                ui.label(theme::strong("Ergebnis", 13.0).color(t.text));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                    theme::chip(ui, t, &format!("{} Farben", d.groups.iter().filter(|g| !g.transp).count()));
+                    theme::chip(ui, t, "keine Verläufe");
+                    theme::chip(ui, t, &format!("mind. {:.1} mm", h.print_min_mm).replace('.', ","));
+                    if d.hand.flat {
+                        theme::chip(ui, t, "flache Grafik erkannt");
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+                    for gi in 0..d.groups.len() {
+                        if d.groups[gi].transp {
+                            continue;
+                        }
+                        theme::swatch(ui, d.gcol(gi), 20.0).on_hover_text(theme::color_name(d.gcol(gi)));
+                    }
+                });
+            });
+        }
+        if h != self.hand {
+            let old_print = self.hand.print;
+            self.hand = h;
+            if self.hand.print && !old_print {
+                // Druckbreite auch für STEP/3MF übernehmen
+                self.b3.width_mm = self.hand.print_width_mm;
+            }
+            if self.hand.print {
+                self.b3.width_mm = self.hand.print_width_mm;
+                self.width_mm = self.hand.print_width_mm;
+                self.mm = true;
+            }
+            if commit {
+                if !self.hand_on {
+                    self.hand_on = true;
+                }
+                self.retrace_fast(ctx);
+            }
+        } else if commit {
+            self.retrace_fast(ctx);
+        }
+    }
+
+    /// Neu nachzeichnen, Texterkennung und Schriftwahl wiederverwenden (schnell).
+    fn retrace_fast(&mut self, ctx: &egui::Context) {
+        let has = self.doc().map(|d| d.hand.k > 0).unwrap_or(false);
+        if has {
+            self.recompute(ctx, 0, |_| {});
+        } else {
+            self.retrace(ctx);
         }
     }
 
@@ -1269,7 +1469,7 @@ impl VectorTab {
     fn export_ui(&mut self, ui: &mut egui::Ui, t: &Tok, st: &Settings, busy: bool) {
         let d = self.doc();
         theme::step(ui, t, 3, "Speichern als");
-        let fmts = [(Fmt::Svg, "SVG"), (Fmt::Pdf, "PDF"), (Fmt::Dxf, "DXF"), (Fmt::Eps, "EPS"), (Fmt::Png, "PNG"), (Fmt::Mf3, "3MF")];
+        let fmts = [(Fmt::Svg, "SVG"), (Fmt::Pdf, "PDF"), (Fmt::Dxf, "DXF"), (Fmt::Png, "PNG"), (Fmt::Mf3, "3MF"), (Fmt::Step, "STEP")];
         let w = (ui.available_width() - 12.0) / 3.0;
         for row in fmts.chunks(3) {
             ui.horizontal(|ui| {
@@ -1289,19 +1489,8 @@ impl VectorTab {
         ui.add_space(4.0);
         if let Some(d) = &d {
             let ar = d.src_h as f64 / d.src_w.max(1) as f64;
-            if self.fmt == Fmt::Mf3 {
-                egui::Grid::new("dim3").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Breite").color(t.muted));
-                    ui.add(egui::DragValue::new(&mut self.width_mm).range(5.0..=1000.0).speed(0.5).suffix(" mm"));
-                    ui.end_row();
-                    ui.label(RichText::new("Dicke je Farbe").color(t.muted));
-                    ui.add(egui::DragValue::new(&mut self.height_3d).range(0.2..=50.0).speed(0.05).suffix(" mm"));
-                    ui.end_row();
-                    ui.label(RichText::new("Sockel").color(t.muted));
-                    ui.add(egui::DragValue::new(&mut self.base_3d).range(0.0..=20.0).speed(0.05).suffix(" mm"));
-                    ui.end_row();
-                });
-                theme::hint(ui, t, &format!("{:.0} × {:.0} mm · jede Farbe ein Teil mit eigenem Filament", self.width_mm, self.width_mm * ar));
+            if matches!(self.fmt, Fmt::Mf3 | Fmt::Step) {
+                self.build3d_ui(ui, t, d, ar);
             } else {
                 ui.horizontal(|ui| {
                     theme::segmented(ui, t, &mut self.mm, &[(true, "mm"), (false, "px")], false);
@@ -1336,6 +1525,75 @@ impl VectorTab {
                 });
             }
         }
+    }
+
+    /// Einstellungen für STEP/3MF: Breite, Aufbau, Grundschicht, Rand, Höhen je Farbe.
+    fn build3d_ui(&mut self, ui: &mut egui::Ui, t: &Tok, d: &Doc, ar: f64) {
+        let b = &mut self.b3;
+        let groups: Vec<usize> = (0..d.groups.len()).filter(|&g| !d.groups[g].transp && d.layers.iter().any(|l| l.idx == g)).collect();
+        if b.heights.len() < d.groups.len() {
+            b.heights.resize(d.groups.len(), b.uniform_mm);
+        }
+        b.names = (0..d.groups.len()).map(|g| theme::color_name(d.gcol(g))).collect();
+        let mm = |ui: &mut egui::Ui, v: &mut f64, lo: f64, hi: f64| {
+            ui.add(egui::DragValue::new(v).range(lo..=hi).speed(0.02).fixed_decimals(1).suffix(" mm"));
+        };
+        egui::Grid::new("b3").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
+            ui.label(RichText::new("Breite").color(t.muted));
+            ui.add(egui::DragValue::new(&mut b.width_mm).range(5.0..=1000.0).speed(0.5).fixed_decimals(0).suffix(" mm"));
+            ui.end_row();
+        });
+        theme::segmented(ui, t, &mut b.stepped, &[(true, "Gestuft"), (false, "Alle gleich hoch")], true);
+        egui::Grid::new("b3h").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
+            if b.stepped {
+                for &g in &groups {
+                    ui.horizontal(|ui| {
+                        theme::swatch(ui, d.gcol(g), 14.0);
+                        ui.label(RichText::new(theme::color_name(d.gcol(g))).color(t.text));
+                    });
+                    mm(ui, &mut b.heights[g], 0.0, 20.0);
+                    ui.end_row();
+                }
+            } else {
+                ui.label(RichText::new("Höhe der Farben").color(t.muted));
+                mm(ui, &mut b.uniform_mm, 0.1, 20.0);
+                ui.end_row();
+            }
+        });
+        ui.add_space(4.0);
+        theme::row(ui, t, "Grundschicht", |ui| {
+            theme::toggle(ui, t, &mut b.base);
+        });
+        if b.base {
+            egui::Grid::new("b3g").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
+                ui.label(RichText::new("Stärke").color(t.muted));
+                mm(ui, &mut b.base_mm, 0.2, 20.0);
+                ui.end_row();
+                ui.label(RichText::new("Farbe").color(t.muted));
+                ui.color_edit_button_srgb(&mut b.base_color);
+                ui.end_row();
+            });
+            theme::row(ui, t, "Rand außen herum", |ui| {
+                theme::toggle(ui, t, &mut b.rim);
+            });
+            if b.rim {
+                egui::Grid::new("b3r").num_columns(2).spacing([10.0, 5.0]).show(ui, |ui| {
+                    ui.label(RichText::new("Breite").color(t.muted));
+                    mm(ui, &mut b.rim_w_mm, 0.2, 10.0);
+                    ui.end_row();
+                    ui.label(RichText::new("Höhe").color(t.muted));
+                    mm(ui, &mut b.rim_h_mm, 0.2, 20.0);
+                    ui.end_row();
+                    ui.label(RichText::new("Farbe").color(t.muted));
+                    ui.color_edit_button_srgb(&mut b.rim_color);
+                    ui.end_row();
+                });
+                theme::hint(ui, t, "Grundschicht ist um die Randbreite kleiner; der Rand füllt die Lücke – beides liegt unter den Farbschichten.");
+            }
+        }
+        let top = if b.base { b.base_mm } else { 0.0 } + if b.stepped { groups.iter().map(|&g| b.heights[g]).fold(0.0, f64::max) } else { b.uniform_mm };
+        let n = groups.len() + b.base as usize + (b.base && b.rim) as usize;
+        theme::hint(ui, t, &format!("{:.0} × {:.0} mm · {} Körper · Höhe {:.1} mm", b.width_mm, b.width_mm * ar, n, top).replace('.', ","));
     }
 
     fn center_ui(&mut self, ui: &mut egui::Ui, t: &Tok, st: &Settings, busy: Option<String>) {

@@ -8,3 +8,7 @@
 - Tafel „Erkannter Text“ mit gewählter Schrift und Übereinstimmung.
 - Kommandozeile `zmn`.
 - Installationsskript `scripts/mac-installieren.sh`.
+- **Für den 3D-Druck**: Druckbreite, Anzahl Farben (Zahl eintippen), Düse, schmalste Stelle; flache Farben ohne Verläufe, dünne Striche und Schrift werden verstärkt statt gelöscht, Schattierungen derselben Farbe zusammengelegt, Fotobereiche als eine Farbe oder ruhige Stufen, eigene Filamentfarben (AMS).
+- **STEP speichern** mit echten Flächen und Farben, ein Körper je Farbe; dazu 3MF mit demselben Aufbau.
+- **Grundschicht und Rand**: Grundschicht unter allen Farbschichten (Umriss minus Randbreite), eigener Rand füllt die Lücke; Stärke, Breite, Höhe und Farben einstellbar; Farben gestuft oder alle gleich hoch.
+- Flache Grafiken werden erkannt und direkt sauber nachgezeichnet (Grundfarben inkl. kleiner wie Rot, Kantenglättung zählt nicht als Farbe).
