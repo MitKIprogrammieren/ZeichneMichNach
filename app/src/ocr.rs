@@ -1,0 +1,1 @@
+//! Texterkennung (folgt)

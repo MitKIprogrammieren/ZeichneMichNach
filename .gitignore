@@ -1,0 +1,4 @@
+target/
+app/target/
+*.dmg
+.DS_Store

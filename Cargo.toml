@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["core"]
+# Die Mac-App (app/) ist ein eigener Workspace, damit der Kern ohne
+# externe Abhängigkeiten gebaut und getestet werden kann.
+exclude = ["app"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
