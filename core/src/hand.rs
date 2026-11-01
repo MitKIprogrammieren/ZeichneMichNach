@@ -541,12 +541,64 @@ fn fit_seg(p: &[Pt]) -> Option<(Pt, Pt, f64)> {
     Some(([mx + d[0] * t0, my + d[1] * t0], [mx + d[0] * t1, my + d[1] * t1], err / n))
 }
 
+/// Enden gerader Linien, die nah beieinander liegen, zu einer sauberen Ecke
+/// verbinden (Schnittpunkt der beiden Geraden).
+fn snap_corners(lines: &mut [LineOut], s: f64) {
+    let reach = 9.0 * s;
+    let n = lines.len();
+    let straight: Vec<bool> = lines.iter().map(|l| l.pts.len() == 2 && !l.closed).collect();
+    for i in 0..n {
+        if !straight[i] {
+            continue;
+        }
+        for ei in 0..2 {
+            let p = lines[i].pts[ei];
+            let mut best: Option<(f64, usize, usize, Pt)> = None;
+            for j in 0..n {
+                if j == i || !straight[j] {
+                    continue;
+                }
+                for ej in 0..2 {
+                    let q = lines[j].pts[ej];
+                    let d = (p[0] - q[0]).hypot(p[1] - q[1]);
+                    if d > reach {
+                        continue;
+                    }
+                    // Schnittpunkt der Geraden
+                    let (a0, a1) = (lines[i].pts[0], lines[i].pts[1]);
+                    let (b0, b1) = (lines[j].pts[0], lines[j].pts[1]);
+                    let (r, t) = ([a1[0] - a0[0], a1[1] - a0[1]], [b1[0] - b0[0], b1[1] - b0[1]]);
+                    let den = r[0] * t[1] - r[1] * t[0];
+                    let lr = r[0].hypot(r[1]);
+                    let lt = t[0].hypot(t[1]);
+                    if den.abs() < 0.15 * lr * lt {
+                        continue; // fast parallel
+                    }
+                    let u = ((b0[0] - a0[0]) * t[1] - (b0[1] - a0[1]) * t[0]) / den;
+                    let x = [a0[0] + u * r[0], a0[1] + u * r[1]];
+                    if (x[0] - p[0]).hypot(x[1] - p[1]) > 1.6 * reach || (x[0] - q[0]).hypot(x[1] - q[1]) > 1.6 * reach {
+                        continue;
+                    }
+                    if best.map(|b| d < b.0).unwrap_or(true) {
+                        best = Some((d, j, ej, x));
+                    }
+                }
+            }
+            if let Some((_, j, ej, x)) = best {
+                lines[i].pts[ei] = x;
+                lines[j].pts[ej] = x;
+            }
+        }
+    }
+}
+
 /// Feine helle oder dunkle Linien finden. Stücke derselben Geraden werden über
 /// Kreuzungen hinweg verbunden, Kreisbögen zu Kreisen ergänzt.
 /// Rückgabe: Linien (Analysepixel) und Maske zum Übermalen.
 pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (Vec<LineOut>, Vec<bool>) {
     let n = w * h;
     let mut lines = Vec::new();
+    let mut short: Vec<bool> = Vec::new();
     let mut erase = vec![false; n];
     if n == 0 {
         return (lines, erase);
@@ -715,7 +767,7 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
             }
             let pts: Vec<Pt> = group.iter().flat_map(|&g| segs[g].pts.iter().copied()).collect();
             let total: f64 = group.iter().map(|&g| segs[g].len).sum();
-            if total < minlen {
+            if total < 14.0 * s {
                 continue;
             }
             let (a, b, err) = fit_seg(&pts).unwrap();
@@ -726,6 +778,7 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
             let width = group.iter().map(|&g| segs[g].width).sum::<f64>() / k;
             let col = [0, 1, 2].map(|c| group.iter().map(|&g| segs[g].color[c]).sum::<f64>() / k);
             lines.push(LineOut { pts: vec![a, b], closed: false, width, color: col.map(|v| v.round() as u8) });
+            short.push(total < minlen);
         }
         // Kreisbögen mit gleichem Kreis zusammenfassen
         let circs: Vec<Option<(Pt, f64, f64)>> = arcs.iter().map(|a| fit_circle(&a.pts)).collect();
@@ -759,9 +812,10 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
             }
             let cover = bins.iter().filter(|&&b| b).count();
             let total: f64 = group.iter().map(|&g| arcs[g].len).sum();
-            if total < minlen {
+            if total < 14.0 * s {
                 continue;
             }
+            let is_short = total < minlen;
             let k = group.len() as f64;
             let width = group.iter().map(|&g| arcs[g].width).sum::<f64>() / k;
             let col = [0, 1, 2].map(|cc| group.iter().map(|&g| arcs[g].color[cc]).sum::<f64>() / k).map(|v| v.round() as u8);
@@ -772,6 +826,7 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
                     [c[0] + rad * t.cos(), c[1] + rad * t.sin()]
                 }).collect();
                 lines.push(LineOut { pts, closed: true, width, color: col });
+                short.push(is_short);
             } else {
                 // Bogen über die abgedeckten Winkel (größter zusammenhängender Bereich)
                 let mut best = (0usize, 0usize);
@@ -798,6 +853,7 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
                     [c[0] + rad * t.cos(), c[1] + rad * t.sin()]
                 }).collect();
                 lines.push(LineOut { pts, closed: false, width, color: col });
+                short.push(is_short);
             }
         }
         for p in 0..n {
@@ -806,6 +862,35 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
             }
         }
     }
+    // kurze Stücke nur behalten, wenn sie an ein längeres Liniennetz anschließen
+    // (z. B. kurze Kanten einer Umrandung); einzelne kurze Striche sind meist Störungen
+    {
+        let near = |a: &LineOut, b: &LineOut| -> bool {
+            let ends = |l: &LineOut| if l.closed { Vec::new() } else { vec![l.pts[0], l.pts[l.pts.len() - 1]] };
+            ends(a).iter().any(|p| b.pts.windows(2).any(|q| seg_dist(*p, q[0], q[1]) < 7.0 * s))
+                || ends(b).iter().any(|p| a.pts.windows(2).any(|q| seg_dist(*p, q[0], q[1]) < 7.0 * s))
+        };
+        let mut keep: Vec<bool> = short.iter().map(|&x| !x).collect();
+        let mut grew = true;
+        while grew {
+            grew = false;
+            for i in 0..lines.len() {
+                if keep[i] {
+                    continue;
+                }
+                if (0..lines.len()).any(|j| keep[j] && near(&lines[i], &lines[j])) {
+                    keep[i] = true;
+                    grew = true;
+                }
+            }
+        }
+        let mut k = 0;
+        lines.retain(|_| {
+            k += 1;
+            keep[k - 1]
+        });
+    }
+    snap_corners(&mut lines, s);
     // übermalen: Linienpixel in der Nähe der gefundenen Linien
     let mut cov = vec![0f32; n];
     for ln in &lines {
@@ -1520,6 +1605,7 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
             eprintln!("    Farben vorher: {:?}, Pflicht {:?}", (0..doc.groups.len()).map(|i| vector::hex(doc.gcol(i))).collect::<Vec<_>>(), keep);
         }
         if h.print_palette.is_empty() {
+            merge_shades(doc, &mut keep);
             limit_colors(doc, h.print_colors, &keep);
         } else {
             map_palette(doc, &h.print_palette);
@@ -1587,6 +1673,63 @@ fn limit_colors(doc: &mut Doc, n: usize, keep: &[usize]) {
         doc.groups[a].src.extend(src);
         doc.groups.remove(b);
         keep = keep.into_iter().filter(|&x| x != b).map(|x| if x > b { x - 1 } else { x }).collect();
+    }
+    doc.k = doc.groups.len();
+}
+
+fn hsv(c: [u8; 3]) -> (f64, f64, f64) {
+    let (r, g, b) = (c[0] as f64 / 255.0, c[1] as f64 / 255.0, c[2] as f64 / 255.0);
+    let mx = r.max(g).max(b);
+    let mn = r.min(g).min(b);
+    let d = mx - mn;
+    let h = if d < 1e-9 {
+        0.0
+    } else if mx == r {
+        60.0 * (((g - b) / d) % 6.0)
+    } else if mx == g {
+        60.0 * ((b - r) / d + 2.0)
+    } else {
+        60.0 * ((r - g) / d + 4.0)
+    };
+    (if h < 0.0 { h + 360.0 } else { h }, if mx > 0.0 { d / mx } else { 0.0 }, mx)
+}
+
+/// Schattierungen derselben Farbe (gleicher Farbton, kräftig, nur heller/dunkler)
+/// zur flächengrößeren Gruppe legen – Gold mit Schatten bleibt ein Gold.
+fn merge_shades(doc: &mut Doc, keep: &mut Vec<usize>) {
+    loop {
+        let n = doc.groups.len();
+        let mut best: Option<(f64, usize, usize)> = None;
+        for a in 0..n {
+            for b in a + 1..n {
+                if doc.groups[a].transp || doc.groups[b].transp {
+                    continue;
+                }
+                let (ha, sa, va) = hsv(doc.gcol(a));
+                let (hb, sb, vb) = hsv(doc.gcol(b));
+                let dh = (ha - hb).abs().min(360.0 - (ha - hb).abs());
+                if sa > 0.45 && sb > 0.45 && dh < 12.0 && va.min(vb) > 0.35 && (va - vb).abs() < 0.35 {
+                    let d = dh + (va - vb).abs() * 40.0;
+                    if best.map(|x| d < x.0).unwrap_or(true) {
+                        best = Some((d, a, b));
+                    }
+                }
+            }
+        }
+        let Some((_, a, b)) = best else { break };
+        let (big, small) = if doc.group_weight(&doc.groups[a]) >= doc.group_weight(&doc.groups[b]) { (a, b) } else { (b, a) };
+        if doc.groups[big].over.is_none() {
+            doc.groups[big].over = Some(doc.gcol(big));
+        }
+        let src = std::mem::take(&mut doc.groups[small].src);
+        doc.groups[big].src.extend(src);
+        doc.groups.remove(small);
+        let was_kept = keep.contains(&small);
+        *keep = keep.iter().filter(|&&x| x != small).map(|&x| if x > small { x - 1 } else { x }).collect();
+        let nb = if big > small { big - 1 } else { big };
+        if was_kept && !keep.contains(&nb) {
+            keep.push(nb);
+        }
     }
     doc.k = doc.groups.len();
 }
@@ -1889,6 +2032,76 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
             for p in 0..n {
                 if m[p] && doc.g[p] >= 0 && (!protect[p] || doc.g[p] == lab) {
                     doc.g[p] = lab;
+                }
+            }
+        }
+    }
+    // kleine Krümel (Inseln unter der Mindestfläche) mit der umgebenden Farbe füllen
+    {
+        let amin = (12.0 * rmin * rmin).max(20.0) as usize;
+        let mut seen = vec![false; n];
+        for st in 0..n {
+            if seen[st] {
+                continue;
+            }
+            let lab = doc.g[st];
+            let mut comp = vec![st];
+            seen[st] = true;
+            let mut i = 0;
+            while i < comp.len() && comp.len() <= amin {
+                let p = comp[i];
+                i += 1;
+                let (x, y) = (p % w, p / w);
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                    if xx < 0 || yy < 0 || xx >= w as i64 || yy >= hh as i64 {
+                        continue;
+                    }
+                    let q = yy as usize * w + xx as usize;
+                    if !seen[q] && doc.g[q] == lab {
+                        seen[q] = true;
+                        comp.push(q);
+                    }
+                }
+            }
+            if comp.len() > amin || comp.iter().any(|&p| protect[p]) {
+                // große Fläche: restliche Pixel als gesehen markieren, damit sie nicht neu starten
+                let mut stack: Vec<usize> = comp[i..].to_vec();
+                while let Some(p) = stack.pop() {
+                    let (x, y) = (p % w, p / w);
+                    for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                        let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                        if xx < 0 || yy < 0 || xx >= w as i64 || yy >= hh as i64 {
+                            continue;
+                        }
+                        let q = yy as usize * w + xx as usize;
+                        if !seen[q] && doc.g[q] == lab {
+                            seen[q] = true;
+                            stack.push(q);
+                        }
+                    }
+                }
+                continue;
+            }
+            // häufigste Nachbarfarbe
+            let mut cnt: std::collections::HashMap<i16, usize> = std::collections::HashMap::new();
+            let inside: std::collections::HashSet<usize> = comp.iter().copied().collect();
+            for &p in &comp {
+                let (x, y) = (p % w, p / w);
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                    if xx < 0 || yy < 0 || xx >= w as i64 || yy >= hh as i64 {
+                        continue;
+                    }
+                    let q = yy as usize * w + xx as usize;
+                    if !inside.contains(&q) {
+                        *cnt.entry(doc.g[q]).or_insert(0) += 1;
+                    }
+                }
+            }
+            if let Some((&v, _)) = cnt.iter().max_by_key(|x| *x.1) {
+                for &p in &comp {
+                    doc.g[p] = v;
                 }
             }
         }
