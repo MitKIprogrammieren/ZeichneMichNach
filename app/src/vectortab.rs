@@ -2,6 +2,7 @@
 
 use crate::theme::{self, Icon, Settings, Tok};
 use eframe::egui::{self, Color32, ColorImage, Pos2, Rect, RichText, Sense, Stroke, TextureHandle, TextureOptions, Vec2};
+use nz_core::hand::{self, HandOpts};
 use nz_core::vector::{self, Doc, Edit, Opts, Shape, Unit};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Menu {
     Main,
+    Hand,
     Background,
     Palette,
     Regions,
@@ -68,6 +70,8 @@ struct Shared {
     gen: u64,
     rendered: Option<Rendered>,
     new_src: bool,
+    /// Ergebnis von „Nachzeichnen wie von Hand“ (erkannte Schriften, Hinweise)
+    hand_info: Option<crate::pipeline::Info>,
 }
 
 struct Tex {
@@ -100,6 +104,9 @@ pub struct VectorTab {
     base_3d: f64,
     show_opts: bool,
     menu: Menu,
+    /// „Nachzeichnen wie von Hand“ an/aus und seine Schalter
+    hand_on: bool,
+    hand: HandOpts,
 }
 
 impl Default for VectorTab {
@@ -126,7 +133,20 @@ impl Default for VectorTab {
             base_3d: 0.0,
             show_opts: false,
             menu: Menu::Main,
+            hand_on: true,
+            hand: HandOpts::default(),
         }
+        .with_test_menu()
+    }
+}
+
+impl VectorTab {
+    /// Für Bildschirmfotos im Test: Menü über ZMN_MENU=hand vorwählen.
+    fn with_test_menu(mut self) -> Self {
+        if std::env::var("ZMN_MENU").as_deref() == Ok("hand") {
+            self.menu = Menu::Hand;
+        }
+        self
     }
 }
 
@@ -175,6 +195,7 @@ impl VectorTab {
         let sh = self.sh.clone();
         let ctx2 = ctx.clone();
         let o = self.o.clone();
+        let hand = self.hand_on.then(|| self.hand.clone());
         let dark = ctx.style().visuals.dark_mode;
         {
             let mut s = sh.lock().unwrap();
@@ -192,7 +213,7 @@ impl VectorTab {
                     let img = img.to_rgba8();
                     let (w, h) = (img.width() as usize, img.height() as usize);
                     let name = path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                    Self::compute_new(sh, ctx2, Doc::new(w, h, img.into_raw()), Some(path), name, o, gen, dark);
+                    Self::compute_new(sh, ctx2, Doc::new(w, h, img.into_raw()), Some(path), name, o, hand, gen, dark);
                 }
                 Err(e) => {
                     let mut s = sh.lock().unwrap();
@@ -213,6 +234,7 @@ impl VectorTab {
         let sh = self.sh.clone();
         let ctx2 = ctx.clone();
         let o = self.o.clone();
+        let hand = self.hand_on.then(|| self.hand.clone());
         let dark = ctx.style().visuals.dark_mode;
         let gen = {
             let mut s = sh.lock().unwrap();
@@ -221,7 +243,7 @@ impl VectorTab {
             s.gen
         };
         self.reset_view();
-        std::thread::spawn(move || Self::compute_new(sh, ctx2, Doc::new(w, h, img), None, "Beispielbild".into(), o, gen, dark));
+        std::thread::spawn(move || Self::compute_new(sh, ctx2, Doc::new(w, h, img), None, "Beispielbild".into(), o, hand, gen, dark));
     }
 
     fn reset_view(&mut self) {
@@ -235,13 +257,31 @@ impl VectorTab {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn compute_new(sh: Arc<Mutex<Shared>>, ctx: egui::Context, mut d: Doc, path: Option<PathBuf>, name: String, o: Opts, gen: u64, dark: bool) {
+    fn compute_new(sh: Arc<Mutex<Shared>>, ctx: egui::Context, mut d: Doc, path: Option<PathBuf>, name: String, o: Opts, hand: Option<HandOpts>, gen: u64, dark: bool) {
         sh.lock().unwrap().busy = Some("Farben und Pfade berechnen".into());
         ctx.request_repaint();
+        let sh2 = sh.clone();
+        let ctx2 = ctx.clone();
+        let p2 = path.clone();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            d.run(0, &o, 0);
+            let info = match &hand {
+                Some(h) => {
+                    let progress = |msg: &str, _f: f32| {
+                        let mut s = sh2.lock().unwrap();
+                        if s.gen == gen {
+                            s.busy = Some(msg.trim_end_matches(" …").to_string());
+                        }
+                        ctx2.request_repaint();
+                    };
+                    Some(crate::pipeline::run(&mut d, p2.as_deref(), &o, h, 0, &progress))
+                }
+                None => {
+                    d.run(0, &o, 0);
+                    None
+                }
+            };
             let rd = render_all(&d, &o, gen, dark);
-            (d, rd)
+            (d, rd, info)
         }));
         let mut s = sh.lock().unwrap();
         if s.gen != gen {
@@ -249,16 +289,42 @@ impl VectorTab {
         }
         s.busy = None;
         match r {
-            Ok((d, rd)) => {
+            Ok((d, rd, info)) => {
                 s.doc = Some(Arc::new(d));
                 s.path = path;
                 s.name = name;
                 s.rendered = Some(rd);
                 s.new_src = true;
+                s.hand_info = info;
             }
             Err(_) => s.error = Some("Interner Fehler bei der Berechnung".into()),
         }
         ctx.request_repaint();
+    }
+
+    /// Das aktuelle Bild komplett neu nachzeichnen (z. B. nach Umschalten von
+    /// „Nachzeichnen wie von Hand“), inklusive Texterkennung.
+    fn retrace(&mut self, ctx: &egui::Context) {
+        let (doc, path, name) = {
+            let s = self.sh.lock().unwrap();
+            match &s.doc {
+                Some(d) => (d.clone(), s.path.clone(), s.name.clone()),
+                None => return,
+            }
+        };
+        let gen = {
+            let mut s = self.sh.lock().unwrap();
+            s.gen += 1;
+            s.busy = Some("Wird nachgezeichnet".into());
+            s.gen
+        };
+        self.k = 0;
+        let mut d = Doc::new(doc.src_w, doc.src_h, doc.src.clone());
+        d.edits = doc.edits.clone();
+        let (sh, ctx2, o) = (self.sh.clone(), ctx.clone(), self.o.clone());
+        let hand = self.hand_on.then(|| self.hand.clone());
+        let dark = ctx.style().visuals.dark_mode;
+        std::thread::spawn(move || Self::compute_new(sh, ctx2, d, path, name, o, hand, gen, dark));
     }
 
     /// Neu berechnen ab Stufe (0..3; 4 = nur neu zeichnen). `f` ändert vorher das Dokument.
@@ -280,10 +346,14 @@ impl VectorTab {
         let k = self.k;
         let ctx2 = ctx.clone();
         let dark = ctx.style().visuals.dark_mode;
+        let hand = (d.hand.k > 0).then(|| self.hand.clone());
         std::thread::spawn(move || {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                 if stage <= 3 {
-                    d.run(stage, &o, k);
+                    match &hand {
+                        Some(h) => hand::refresh(&mut d, &o, h, k, stage),
+                        None => d.run(stage, &o, k),
+                    }
                 }
                 let rd = render_all(&d, &o, gen, dark);
                 (d, rd)
@@ -614,11 +684,16 @@ impl VectorTab {
             Menu::Edges => "Flächen & Kanten",
             Menu::Curves => "Kurven & Formen",
             Menu::Symmetry => "Symmetrie",
+            Menu::Hand => "Nachzeichnen wie von Hand",
             Menu::Main => "",
         };
         ui.label(theme::strong(title, 20.0).color(t.text));
         theme::hint(ui, t, "Änderungen wirken sofort auf die Vorschau");
         ui.add_space(8.0);
+        if self.menu == Menu::Hand {
+            self.hand_ui(ui, t, ctx, &d);
+            return;
+        }
         if self.menu == Menu::Background {
             self.background_ui(ui, t, ctx, &d);
         }
@@ -823,7 +898,9 @@ impl VectorTab {
         ui.label(theme::strong("Ergebnis verfeinern", 20.0).color(t.text));
         ui.add_space(6.0);
         let bg = d.background_group().map(|g| d.groups[g].transp);
-        let items: [(Menu, &str, &str, Option<String>); 6] = [
+        let hand_badge = if self.hand_on { "an" } else { "aus" }.to_string();
+        let items: [(Menu, &str, &str, Option<String>); 7] = [
+            (Menu::Hand, "Nachzeichnen wie von Hand", "Versteht das Bild: Text, feine Linien, Verläufe, Fotobereiche – alles lokal", Some(hand_badge)),
             (Menu::Background, "Hintergrund", "Hintergrund entfernen oder als Fläche behalten", bg.map(|b| if b { "entfernt".to_string() } else { "behalten".to_string() })),
             (Menu::Palette, "Palette", "Anzahl der Farben, Farben ändern, zusammenlegen oder transparent machen", Some(d.groups.len().to_string())),
             (Menu::Regions, "Regionen", "Einzelne Flächen anklicken und umfärben, zusammenführen oder entfernen", if d.edits.is_empty() { None } else { Some(d.edits.len().to_string()) }),
@@ -892,6 +969,83 @@ impl VectorTab {
     }
 
     /// Regionen: Hinweise und Bearbeitungsliste (die Auswahl selbst steht rechts)
+    /// Schalter von „Nachzeichnen wie von Hand“
+    fn hand_ui(&mut self, ui: &mut egui::Ui, t: &Tok, ctx: &egui::Context, d: &Doc) {
+        let mut on = self.hand_on;
+        let mut h = self.hand.clone();
+        theme::card(ui, t, |ui| {
+            theme::row(ui, t, "Eingeschaltet", |ui| {
+                theme::toggle(ui, t, &mut on);
+            });
+            theme::hint(ui, t, "Statt nur Pixelflächen nachzuziehen, wird das Bild erst verstanden. Läuft komplett auf deinem Mac, ohne Internet.");
+        });
+        ui.add_space(6.0);
+        let rows: [(&str, &str, bool); 5] = [
+            ("Hintergrund außen freistellen", "Einfarbiger Rand um das Motiv wird transparent", h.bg_cut),
+            ("Text erkennen & ersetzen", "Apple-Texterkennung, passende Schrift von deinem Mac – auch fett und dünn gemischt", h.text),
+            ("Feine Linien als Striche", "Spielfeld- und Rahmenlinien bleiben durchgehend, Kreise werden echte Kreise", h.lines),
+            ("Fotobereiche beruhigen", "Fotos und Muster (Waben, Raster) werden weiche Flächen statt Flecken", h.photo),
+            ("Farbverläufe erkennen", "Gold, Metall und Schatten als echter Verlauf statt Farbstufen", h.gradients),
+        ];
+        let mut vals: Vec<bool> = rows.iter().map(|r| r.2).collect();
+        theme::card(ui, t, |ui| {
+            if !on {
+                ui.disable();
+            }
+            for (i, (title, sub, _)) in rows.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(6.0);
+                }
+                theme::row(ui, t, title, |ui| {
+                    theme::toggle(ui, t, &mut vals[i]);
+                });
+                ui.add(egui::Label::new(RichText::new(*sub).size(11.5).color(t.muted)).wrap());
+            }
+        });
+        h.bg_cut = vals[0];
+        h.text = vals[1];
+        h.lines = vals[2];
+        h.photo = vals[3];
+        h.gradients = vals[4];
+        ui.add_space(6.0);
+        // Ergebnis
+        if self.hand_on {
+            let info = self.sh.lock().unwrap().hand_info.clone();
+            theme::card(ui, t, |ui| {
+                ui.label(theme::strong("Gefunden", 13.0).color(t.text));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 5.0);
+                    theme::chip(ui, t, &format!("{} Texte", d.hand.texts));
+                    theme::chip(ui, t, &format!("{} Linien", d.hand.lines.len()));
+                    theme::chip(ui, t, &format!("{} Verläufe", d.hand.grads.len()));
+                    if d.hand.photo > 0.0 {
+                        theme::chip(ui, t, &format!("{:.0} % Foto", d.hand.photo * 100.0));
+                    }
+                });
+                if let Some(i) = &info {
+                    if let Some(n) = &i.note {
+                        ui.label(RichText::new(n).size(11.5).color(t.warn));
+                    }
+                    ui.label(RichText::new(format!("berechnet in {:.1} s", i.secs)).size(11.0).color(t.faint));
+                }
+            });
+            ui.add_space(6.0);
+        }
+        if theme::primary_button(ui, t, "Neu nachzeichnen", true, true).clicked() {
+            self.retrace(ctx);
+        }
+        if on != self.hand_on || h != self.hand {
+            let only_grad = on == self.hand_on && HandOpts { gradients: self.hand.gradients, ..h.clone() } == self.hand;
+            self.hand_on = on;
+            self.hand = h;
+            if only_grad && d.hand.k > 0 {
+                self.recompute(ctx, 3, |_| {});
+            } else {
+                self.retrace(ctx);
+            }
+        }
+    }
+
     fn regions_ui(&mut self, ui: &mut egui::Ui, t: &Tok, ctx: &egui::Context, d: &Doc) {
         theme::card(ui, t, |ui| {
             theme::hint(ui, t, "Tippe in der Vorschau auf eine Fläche. Rechts kannst du sie dann umfärben, mit einem Nachbarn verschmelzen oder transparent machen.");
@@ -1032,6 +1186,21 @@ impl VectorTab {
                 return;
             }
         };
+        let info = self.sh.lock().unwrap().hand_info.clone();
+        if let Some(i) = info.filter(|i| !i.matches.is_empty()) {
+            ui.label(theme::strong("Erkannter Text", 15.0).color(t.text));
+            ui.add_space(2.0);
+            for m in &i.matches {
+                theme::card(ui, t, |ui| {
+                    ui.label(theme::strong(&m.text, 13.5).color(t.text));
+                    ui.add(egui::Label::new(RichText::new(format!("{} · {}", m.family, m.styles.join(", "))).size(11.5).color(t.muted)).wrap());
+                    ui.label(RichText::new(format!("Übereinstimmung {:.0} %", m.score * 100.0)).size(11.0).color(t.faint));
+                });
+                ui.add_space(4.0);
+            }
+            theme::hint(ui, t, "Schrift aus den Schriften deines Macs, als Kurven gespeichert – die SVG sieht überall gleich aus.");
+            ui.add_space(12.0);
+        }
         ui.label(theme::strong("Fläche bearbeiten", 15.0).color(t.text));
         ui.horizontal(|ui| {
             if theme::ghost(ui, t, "Rückgängig", !d.edits.is_empty()).on_hover_text("Strg/Cmd+Z").clicked() && !d.edits.is_empty() {
@@ -1343,6 +1512,11 @@ impl VectorTab {
             format!("{ells} Kreise/Ellipsen"),
         ] {
             stat_chip(&mut lu, t, &txt);
+        }
+        for (n, what) in [(d.hand.grads.len(), "Verläufe"), (d.hand.lines.len(), "Linien"), (d.hand.texts, "Texte")] {
+            if n > 0 {
+                stat_chip(&mut lu, t, &format!("{n} {what}"));
+            }
         }
         // Zoom unten rechts
         let zr = Rect::from_min_size(rect.right_bottom() - Vec2::new(50.0, 130.0), Vec2::new(34.0, 116.0));

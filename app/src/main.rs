@@ -4,6 +4,7 @@
 mod dialog;
 mod fonts;
 mod ocr;
+mod pipeline;
 mod settings_page;
 mod theme;
 mod vectortab;
