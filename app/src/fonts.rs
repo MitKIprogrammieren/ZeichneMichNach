@@ -538,8 +538,39 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
         if val < 0.5 {
             continue; // nichts passt gut genug – lieber als Fläche nachzeichnen
         }
-        let mut shapes = Vec::new();
-        let mut styles: Vec<String> = Vec::new();
+        // Schriftbänder: aufeinanderfolgende Großbuchstaben/Ziffern gleicher Höhe bilden
+        // einen Lauf (z. B. fettes „KADER“ größer als dünnes „SCHMIEDE“). Ein Ausschnitt,
+        // der zu keinem Nachbarn passt (enthält Teile des Nachbarbuchstabens), übernimmt
+        // Band und Schnitt des Nachbarn mit der passenden Kante.
+        let caps = |g: &Grp| l.chars[g.0..g.1].iter().all(|c| (c.is_ascii_uppercase() && *c != 'Q' && *c != 'J') || c.is_ascii_digit());
+        let ng = grp.len();
+        let ink: Vec<Option<[f64; 4]>> = grp.iter().map(|g| pieces.get(&(g.2, g.3)).map(|p| p.3)).collect();
+        let hgt = |i: usize| ink[i].map(|q| q[3] - q[1]).unwrap_or(0.0);
+        let similar = |i: usize, j: usize| caps(&grp[i]) && caps(&grp[j]) && (hgt(i) - hgt(j)).abs() <= 0.04 * hgt(i).max(hgt(j)).max(1e-6);
+        let mut run_id = vec![usize::MAX; ng];
+        let mut runs: Vec<Vec<usize>> = Vec::new();
+        for i in 0..ng {
+            if !caps(&grp[i]) || ink[i].is_none() {
+                continue;
+            }
+            if i > 0 && run_id[i - 1] != usize::MAX && similar(i - 1, i) {
+                run_id[i] = run_id[i - 1];
+                runs[run_id[i]].push(i);
+            } else {
+                run_id[i] = runs.len();
+                runs.push(vec![i]);
+            }
+        }
+        let median = |v: &mut Vec<f64>| -> f64 {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let bands: Vec<(f64, f64)> = runs
+            .iter()
+            .map(|r| (median(&mut r.iter().map(|&i| ink[i].unwrap()[1]).collect()), median(&mut r.iter().map(|&i| ink[i].unwrap()[3]).collect())))
+            .collect();
+        // beste Schnitte je Gruppe
+        let mut picks: Vec<Option<usize>> = Vec::new();
         for g in &grp {
             let mut pick = (f64::MIN, usize::MAX);
             for (ci, table) in &evald {
@@ -551,10 +582,49 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
                     pick = (v, *ci);
                 }
             }
-            if pick.1 == usize::MAX {
+            picks.push((pick.1 != usize::MAX).then_some(pick.1));
+        }
+        let mut band_of: Vec<Option<(f64, f64)>> = (0..ng).map(|i| (run_id[i] != usize::MAX).then(|| bands[run_id[i]])).collect();
+        let mut outlier = vec![false; ng];
+        for i in 0..ng {
+            if run_id[i] == usize::MAX || runs[run_id[i]].len() > 1 {
                 continue;
             }
-            let c = &cands[pick.1];
+            // Einzelgänger: Nachbar mit passender Ober- oder Unterkante suchen
+            let me = ink[i].unwrap();
+            let mut best: Option<(f64, usize)> = None;
+            for j in [i.wrapping_sub(1), i + 1] {
+                if j >= ng || run_id[j] == usize::MAX || runs[run_id[j]].len() < 2 {
+                    continue;
+                }
+                let (t, b) = bands[run_id[j]];
+                // umschließt das Band des Nachbarn den ganzen Ausschnitt, stammt der
+                // überstehende Teil vermutlich von genau diesem Nachbarn – schlechter bewerten
+                let encl = t <= me[1] + 0.5 && b >= me[3] - 0.5;
+                let d = (me[1] - t).abs().min((me[3] - b).abs()) + if encl { 0.03 * hgt(i) } else { 0.0 };
+                if best.map(|x| d < x.0).unwrap_or(true) {
+                    best = Some((d, j));
+                }
+            }
+            if let Some((d, j)) = best {
+                if d <= 0.08 * hgt(i) {
+                    outlier[i] = true;
+                    band_of[i] = band_of[j];
+                    picks[i] = picks[j];
+                }
+            }
+        }
+        if debug {
+            for (i, g) in grp.iter().enumerate() {
+                eprintln!("      Gruppe „{}“ Ausschnitt {:?} Band {:?} Ausreißer {} Schnitt {:?}", l.chars[g.0..g.1].iter().collect::<String>(), ink[i].map(|q| q.map(|v| v.round())), band_of[i].map(|b| (b.0.round(), b.1.round())), outlier[i], picks[i].map(|c| cands[c].style.clone()));
+            }
+        }
+        let band_at = |i: usize| band_of[i];
+        let mut shapes = Vec::new();
+        let mut styles: Vec<String> = Vec::new();
+        for (gi, g) in grp.iter().enumerate() {
+            let Some(pi) = picks[gi] else { continue };
+            let c = &cands[pi];
             let data: std::borrow::Cow<[u8]> = match &c.src.0 {
                 Some(p) => std::borrow::Cow::Owned(std::fs::read(p).unwrap_or_default()),
                 None => std::borrow::Cow::Borrowed(INTER[c.src.1 as usize].0),
@@ -563,14 +633,18 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
             let text: String = l.chars[g.0..g.1].iter().collect();
             let gl = if g.1 - g.0 == 1 { glyph(&face, l.chars[g.0]) } else { glyph_run(&face, &text) };
             if let (Some(gl), Some(p)) = (gl, pieces.get(&(g.2, g.3))) {
-                let ink = p.3;
+                let mut ink = p.3;
+                if let Some((t, b)) = band_at(gi) {
+                    ink[1] = t;
+                    ink[3] = b;
+                }
                 let (iw, ih) = (ink[2] - ink[0], ink[3] - ink[1]);
                 // nicht stärker verzerren als nötig: weicht das Seitenverhältnis deutlich
                 // ab, die Glyphe in Originalproportion mittig setzen
                 let ga = ((gl.bb[2] - gl.bb[0]) / (gl.bb[3] - gl.bb[1]).max(1e-3)) as f64;
                 let k = (iw / ih.max(1e-6)) / ga.max(1e-6);
-                let rect = if !(0.77..=1.3).contains(&k) {
-                    let w2 = (ga * ih).min(iw.max(ga * ih * 0.77));
+                let rect = if !(0.77..=1.3).contains(&k) || outlier[gi] {
+                    let w2 = ga * ih;
                     [ink[0] + (iw - w2) / 2.0, ink[1], w2, ih]
                 } else {
                     [ink[0], ink[1], iw, ih]
