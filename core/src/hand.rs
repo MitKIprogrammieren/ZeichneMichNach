@@ -1010,6 +1010,30 @@ pub fn calm_photo_ex(d: &mut Vec<u8>, w: usize, h: usize, sc: f64, loose: bool) 
     (frac, busy)
 }
 
+/// Pixel an scharfen, kontrastreichen Kanten samt kleiner Umgebung (Schrift, Linien).
+fn sharp_mask(d: &[u8], w: usize, h: usize, sc: f64) -> Vec<bool> {
+    let n = w * h;
+    let mut m = vec![false; n];
+    if w < 3 || h < 3 {
+        return m;
+    }
+    for y in 1..h - 1 {
+        for x in 1..w - 1 {
+            let p = y * w + x;
+            let c = lum(d, p);
+            let g = (lum(d, p + 1) - c).abs().max((lum(d, p - 1) - c).abs()).max((lum(d, p + w) - c).abs()).max((lum(d, p - w) - c).abs());
+            if g > 70.0 {
+                m[p] = true;
+            }
+        }
+    }
+    // dünne Teile (Buchstaben) ganz einschließen: um Strichbreite erweitern
+    let r = ((3.0 * sc).round() as usize).max(2);
+    let grown = morph_mask(&m, w, h, r, true);
+    // nur dort, wo es heller oder dunkler als das Umfeld ist (keine breiten Säume)
+    grown
+}
+
 /// Fotobereiche für den Druck vereinfachen: 0 = eine Farbe, 1 = drei ruhige Stufen.
 fn simplify_photo(d: &mut [u8], busy: &[bool], mode: u8) {
     let idx: Vec<usize> = (0..busy.len()).filter(|&p| busy[p] && d[p * 4 + 3] >= 128).collect();
@@ -1587,9 +1611,27 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     let before = doc.data.clone();
     inpaint(&mut doc.data, w, hh, &erase);
     if h.photo {
-        let (frac, busy) = calm_photo_ex(&mut doc.data, w, hh, sc, h.print && h.print_photo < 2);
+        let before_calm = doc.data.clone();
+        // scharfe Kanten (Schrift, Linien) vor dem Vereinfachen merken – Lichter und
+        // Fotoflächen sind weich und dürfen weg, Schrift muss bleiben
+        let sharp = sharp_mask(&doc.data, w, hh, sc);
+        // Fotobereiche vereinfachen – auch ohne Druckmodus, sonst entstehen Tarnflecken
+        let (frac, mut busy) = calm_photo_ex(&mut doc.data, w, hh, sc, h.print_photo < 2);
+        if busy.len() == n {
+            for p in 0..n {
+                if sharp[p] {
+                    busy[p] = false;
+                }
+            }
+            // geschützte Pixel bekommen ihre ursprüngliche Farbe zurück
+            for p in 0..n {
+                if sharp[p] {
+                    doc.data[p * 4..p * 4 + 4].copy_from_slice(&before_calm[p * 4..p * 4 + 4]);
+                }
+            }
+        }
         doc.hand.photo = frac;
-        if h.print && h.print_photo < 2 && busy.len() == n {
+        if h.print_photo < 2 && busy.len() == n {
             simplify_photo(&mut doc.data, &busy, h.print_photo);
         }
         // feine Muster (Waben, Raster) auch in ruhigen Flächen glätten,

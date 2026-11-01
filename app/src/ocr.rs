@@ -30,7 +30,7 @@ pub fn recognize(image: &Path, w: usize, h: usize) -> Result<Vec<TextLine>, Stri
         let hp = helper().ok_or("Texterkennung nicht installiert")?;
         let out = std::process::Command::new(hp).arg(image).output().map_err(|e| e.to_string())?;
         if !out.status.success() {
-            return Err(format!("Texterkennung fehlgeschlagen: {}", String::from_utf8_lossy(&out.stderr).trim()));
+            return Err(format!("Code {} – {}", out.status.code().unwrap_or(-1), String::from_utf8_lossy(&out.stderr).trim()));
         }
         String::from_utf8_lossy(&out.stdout).to_string()
     };

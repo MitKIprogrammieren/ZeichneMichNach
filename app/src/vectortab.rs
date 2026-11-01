@@ -1053,6 +1053,16 @@ impl VectorTab {
         h.lines = vals[2];
         h.photo = vals[3];
         h.gradients = vals[4];
+        if h.photo && on {
+            ui.add_space(6.0);
+            theme::card(ui, t, |ui| {
+                ui.label(RichText::new("Fotobereiche werden zu").color(t.text));
+                let mut ph = h.print_photo;
+                if theme::segmented(ui, t, &mut ph, &[(0u8, "Eine Farbe"), (1u8, "Ruhige Stufen"), (2u8, "Flecken")], true) {
+                    h.print_photo = ph;
+                }
+            });
+        }
         ui.add_space(6.0);
         // Ergebnis
         if self.hand_on {
@@ -1387,6 +1397,15 @@ impl VectorTab {
             }
         };
         let info = self.sh.lock().unwrap().hand_info.clone();
+        if let Some(n) = info.as_ref().and_then(|i| i.note.clone()) {
+            if self.hand_on && self.hand.text {
+                ui.label(theme::strong("Texterkennung", 15.0).color(t.text));
+                theme::card(ui, t, |ui| {
+                    ui.add(egui::Label::new(RichText::new(n).size(12.0).color(t.warn)).wrap());
+                });
+                ui.add_space(10.0);
+            }
+        }
         if let Some(i) = info.filter(|i| !i.matches.is_empty()) {
             ui.label(theme::strong("Erkannter Text", 15.0).color(t.text));
             ui.add_space(2.0);
