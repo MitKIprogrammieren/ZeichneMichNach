@@ -578,7 +578,23 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
             let mut near = std::collections::HashSet::new();
             let mut col = [0f64; 3];
             for &p in &ch {
-                let c = px(d, p);
+                // Farbe der Linie: hellster (bzw. dunkelster) Punkt im Umfeld –
+                // der Mittelwert wäre bei dünnen Linien mit dem Untergrund vermischt
+                let (x0, y0) = ((p % w) as i64, (p / w) as i64);
+                let mut pick = p;
+                for dy in -1i64..=1 {
+                    for dx in -1i64..=1 {
+                        let (xx, yy) = (x0 + dx, y0 + dy);
+                        if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 {
+                            continue;
+                        }
+                        let q = yy as usize * w + xx as usize;
+                        if (bright && lum(d, q) > lum(d, pick)) || (!bright && lum(d, q) < lum(d, pick)) {
+                            pick = q;
+                        }
+                    }
+                }
+                let c = px(d, pick);
                 for k in 0..3 {
                     col[k] += c[k] / ch.len() as f64;
                 }
@@ -1527,6 +1543,8 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
     let rmin = (h.print_min_mm * ppm / 2.0).max(0.6) as f32;
     // Linien einbrennen (mindestens so breit wie erlaubt)
     let lines = std::mem::take(&mut doc.hand.lines);
+    // eingebrannte Linien und Schrift haben Vorrang vor dem Verbreitern anderer Flächen
+    let mut protect = vec![false; n];
     if std::env::var_os("ZMN_DEBUG").is_some() {
         eprintln!("    Druck: {} Linien einbrennen, rmin {:.1} px", lines.len(), rmin);
     }
@@ -1534,13 +1552,40 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
         let pts: Vec<Pt> = ln.pts.iter().map(|q| [q[0] * sc, q[1] * sc]).collect();
         let mut cov = vec![0f32; n];
         stroke_line(&mut cov, w, hh, &pts, ln.closed, (ln.width * sc).max(2.0 * rmin as f64 + 1.0), 1);
-        let gi = nearest_group_ex(doc, ln.color, false) as i16;
+        // Untergrund der Linie (häufigste Farbe im Saum) – die Linie darf nicht
+        // dieselbe Farbe bekommen, sonst verschwindet sie
+        let mut ring = vec![0f32; n];
+        stroke_line(&mut ring, w, hh, &pts, ln.closed, (ln.width * sc).max(2.0 * rmin as f64 + 1.0) + 6.0, 1);
+        let mut under: std::collections::HashMap<i16, usize> = std::collections::HashMap::new();
+        for p in 0..n {
+            if ring[p] >= 0.5 && cov[p] < 0.5 {
+                *under.entry(doc.g[p]).or_insert(0) += 1;
+            }
+        }
+        let bg = under.into_iter().max_by_key(|x| x.1).map(|x| x.0).unwrap_or(-1);
+        let mut gi = nearest_group_ex(doc, ln.color, false) as i16;
+        if gi == bg {
+            // zweitnächste Farbe nehmen
+            let cf = ln.color.map(|v| v as f64);
+            let mut best = (f64::MAX, gi);
+            for g in 0..doc.groups.len() {
+                if g as i16 == bg || doc.groups[g].transp {
+                    continue;
+                }
+                let dd = cdist(cf, doc.gcol(g).map(|v| v as f64));
+                if dd < best.0 {
+                    best = (dd, g as i16);
+                }
+            }
+            gi = best.1;
+        }
         if std::env::var_os("ZMN_DEBUG").is_some() {
-            eprintln!("      Linie {} -> Gruppe {} {}", vector::hex(ln.color), gi, vector::hex(doc.gcol(gi as usize)));
+            eprintln!("      Linie {} -> Gruppe {} {} bei {:?} breite {:.1}", vector::hex(ln.color), gi, vector::hex(doc.gcol(gi as usize)), ln.pts.first().map(|p| (p[0].round(), p[1].round())), ln.width);
         }
         for p in 0..n {
             if cov[p] >= 0.5 && doc.g[p] >= 0 {
                 doc.g[p] = gi;
+                protect[p] = true;
             }
         }
     }
@@ -1558,9 +1603,13 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
         for p in 0..n {
             if m2[p] && doc.g[p] >= 0 {
                 doc.g[p] = gi;
+                protect[p] = true;
             }
         }
     }
+    let dbg = std::env::var_os("ZMN_DEBUG").is_some();
+    let count = |g: &[i16]| { let mut c = std::collections::BTreeMap::new(); for &v in g { *c.entry(v).or_insert(0usize) += 1; } c };
+    if dbg { eprintln!("    nach Einbrennen: {:?}", count(&doc.g)); }
     // jede Farbe (auch transparent) rund öffnen
     for _pass in 0..2 {
         let mut labels: Vec<i16> = doc.g.clone();
@@ -1655,6 +1704,7 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
                 orphan[p] = false;
             }
         }
+        if dbg { eprintln!("    nach Öffnen: {:?}, {} verbreitert", count(&doc.g), thicken.len()); }
         // verbreiterte Teile wieder einsetzen
         for (comp, lab, grow) in thicken {
             let mut m = vec![false; n];
@@ -1663,13 +1713,18 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
             }
             let m = dilate_round(&m, w, hh, grow);
             for p in 0..n {
-                if m[p] && doc.g[p] >= 0 {
+                if m[p] && doc.g[p] >= 0 && (!protect[p] || doc.g[p] == lab) {
                     doc.g[p] = lab;
                 }
             }
         }
     }
     doc.hand.lines.clear();
+    if let Some(dir) = std::env::var_os("ZMN_DEBUG_DIR") {
+        let mut pgm = format!("P5 {w} {hh} 255\n").into_bytes();
+        pgm.extend(doc.g.iter().map(|&v| if v < 0 { 0u8 } else { 60 + (v as u8).wrapping_mul(60) }));
+        let _ = std::fs::write(std::path::Path::new(&dir).join("druck-g.pgm"), pgm);
+    }
 }
 
 /// Farbanzahl setzen (0 = automatisch, für Logos etwas reichlicher).
