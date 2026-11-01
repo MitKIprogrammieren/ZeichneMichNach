@@ -11,6 +11,7 @@ pub mod export3mf;
 pub mod external;
 pub mod hand;
 pub mod hollow;
+pub mod relief;
 pub mod inspect;
 pub mod io;
 pub mod json;

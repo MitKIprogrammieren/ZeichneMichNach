@@ -5,25 +5,25 @@ use crate::math::V3;
 use crate::surf::Surf;
 use std::fmt::Write as _;
 
-struct W {
-    out: String,
-    id: usize,
+pub(crate) struct W {
+    pub(crate) out: String,
+    pub(crate) id: usize,
 }
 
 impl W {
-    fn add(&mut self, s: impl AsRef<str>) -> usize {
+    pub(crate) fn add(&mut self, s: impl AsRef<str>) -> usize {
         self.id += 1;
         let _ = writeln!(self.out, "#{}={};", self.id, s.as_ref());
         self.id
     }
-    fn pt(&mut self, p: V3) -> usize {
+    pub(crate) fn pt(&mut self, p: V3) -> usize {
         self.add(format!("CARTESIAN_POINT('',({},{},{}))", r(p.x), r(p.y), r(p.z)))
     }
-    fn dir(&mut self, d: V3) -> usize {
+    pub(crate) fn dir(&mut self, d: V3) -> usize {
         let d = d.normalized();
         self.add(format!("DIRECTION('',({},{},{}))", r(d.x), r(d.y), r(d.z)))
     }
-    fn ax2(&mut self, o: V3, z: V3, x: V3) -> usize {
+    pub(crate) fn ax2(&mut self, o: V3, z: V3, x: V3) -> usize {
         let z = z.normalized();
         let mut x = x - z * x.dot(z);
         if x.norm() < 1e-9 {
@@ -37,7 +37,7 @@ impl W {
 }
 
 /// STEP-konforme Gleitkommazahl (immer mit Dezimalpunkt).
-fn r(v: f64) -> String {
+pub(crate) fn r(v: f64) -> String {
     if !v.is_finite() || v.abs() < 1e-13 {
         return "0.".into();
     }
@@ -65,7 +65,7 @@ fn r(v: f64) -> String {
     }
 }
 
-fn esc(s: &str) -> String {
+pub(crate) fn esc(s: &str) -> String {
     s.chars()
         .map(|c| if c == '\'' { "''".to_string() } else if c.is_ascii() && !c.is_ascii_control() { c.to_string() } else { "_".to_string() })
         .collect()
@@ -271,7 +271,7 @@ pub fn write_step(breps: &[Brep], name: &str, file_name: &str) -> String {
     s
 }
 
-fn timestamp() -> String {
+pub(crate) fn timestamp() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)

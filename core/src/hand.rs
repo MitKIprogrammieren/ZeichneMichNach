@@ -1458,7 +1458,7 @@ fn limit_colors(doc: &mut Doc, n: usize) {
 }
 
 /// Abstand zum nächsten Pixel außerhalb der Maske (Fasen-Abstand 3/4, in Pixeln).
-fn dist_in(m: &[bool], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn dist_in(m: &[bool], w: usize, h: usize) -> Vec<f32> {
     let big = 1e9f32;
     let mut d: Vec<f32> = m.iter().map(|&b| if b { big } else { 0.0 }).collect();
     for y in 0..h {
