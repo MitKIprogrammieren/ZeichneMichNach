@@ -29,6 +29,8 @@ pub struct HandOpts {
     pub print_colors: usize,
     /// Fotobereiche im Druck: 0 = eine Farbe, 1 = ruhige Stufen, 2 = so lassen
     pub print_photo: u8,
+    /// feste Filamentfarben (leer = automatisch)
+    pub print_palette: Vec<[u8; 3]>,
 }
 
 impl Default for HandOpts {
@@ -45,6 +47,7 @@ impl Default for HandOpts {
             print_min_mm: 0.8,
             print_colors: 4,
             print_photo: 0,
+            print_palette: Vec::new(),
         }
     }
 }
@@ -821,6 +824,12 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
 /// Unruhige, großflächige Bereiche (Fotos, Muster) finden und kantenerhaltend glätten.
 /// Rückgabe: Anteil der Fotobereiche.
 pub fn calm_photo(d: &mut Vec<u8>, w: usize, h: usize, sc: f64) -> (f64, Vec<bool>) {
+    calm_photo_ex(d, w, h, sc, false)
+}
+
+/// `loose`: für den Druck großzügiger – erfasst auch ruhigere Fotobereiche und
+/// schließt Lücken dazwischen.
+pub fn calm_photo_ex(d: &mut Vec<u8>, w: usize, h: usize, sc: f64, loose: bool) -> (f64, Vec<bool>) {
     let n = w * h;
     if n == 0 {
         return (0.0, Vec::new());
@@ -848,17 +857,38 @@ pub fn calm_photo(d: &mut Vec<u8>, w: usize, h: usize, sc: f64) -> (f64, Vec<boo
     }
     let r = ((10.0 * sc).round() as usize).max(4);
     let mut busy = vec![false; n];
+    let mut loose_m = vec![false; n];
     for y in 0..h {
         for x in 0..w {
             let (x0, y0, x1, y1) = (x.saturating_sub(r), y.saturating_sub(r), (x + r + 1).min(w), (y + r + 1).min(h));
             let cnt = s[y1 * (w + 1) + x1] + s[y0 * (w + 1) + x0] - s[y0 * (w + 1) + x1] - s[y1 * (w + 1) + x0];
             let area = ((x1 - x0) * (y1 - y0)) as f64;
-            busy[y * w + x] = cnt as f64 / area > 0.38 && d[(y * w + x) * 4 + 3] >= 128;
+            let frac_e = cnt as f64 / area;
+            busy[y * w + x] = frac_e > 0.38 && d[(y * w + x) * 4 + 3] >= 128;
+            loose_m[y * w + x] = frac_e > 0.2 && d[(y * w + x) * 4 + 3] >= 128;
         }
     }
     // schmale Bereiche (Schrift) herausnehmen: Öffnen
     let k = ((14.0 * sc).round() as usize).max(5);
-    let busy = morph_mask(&morph_mask(&busy, w, h, k, false), w, h, k + 2, true);
+    let mut busy = morph_mask(&morph_mask(&busy, w, h, k, false), w, h, k + 2, true);
+    if loose {
+        // großzügiger: ruhigere Fotobereiche und Lücken dazu – aber nur Pixel, deren
+        // Helligkeit zum Foto passt (das Motiv, z. B. eine Goldfläche, bleibt außen vor)
+        let ldat: Vec<f64> = (0..n).map(|p| lum(d, p)).collect();
+        let mut v: Vec<f64> = (0..n).filter(|&p| busy[p]).map(|p| ldat[p]).collect();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if !v.is_empty() {
+            let (lo, hi) = (v[v.len() / 20], v[v.len() * 19 / 20]);
+            let open_l = morph_mask(&morph_mask(&loose_m, w, h, k, false), w, h, k + 2, true);
+            let joined: Vec<bool> = (0..n).map(|p| busy[p] || open_l[p]).collect();
+            let closed = morph_mask(&morph_mask(&joined, w, h, 3 * k, true), w, h, 3 * k, false);
+            for p in 0..n {
+                if closed[p] && !busy[p] && ldat[p] >= lo - 10.0 && ldat[p] <= hi + 10.0 && d[p * 4 + 3] >= 128 {
+                    busy[p] = true;
+                }
+            }
+        }
+    }
     let frac = busy.iter().filter(|&&b| b).count() as f64 / n as f64;
     if frac < 0.01 {
         return (0.0, Vec::new());
@@ -908,7 +938,11 @@ fn simplify_photo(d: &mut [u8], busy: &[bool], mode: u8) {
         c
     };
     if mode == 0 {
-        let c = med(&idx);
+        // eine Farbe: eher dunkel (unteres Viertel der Helligkeit), Fotos wirken sonst verwaschen
+        let mut by_l: Vec<(f64, usize)> = idx.iter().map(|&p| (lum(d, p), p)).collect();
+        by_l.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let q: Vec<usize> = by_l[by_l.len() / 8..(by_l.len() * 3 / 8).max(by_l.len() / 8 + 1)].iter().map(|x| x.1).collect();
+        let c = med(&q);
         for &p in &idx {
             d[p * 4..p * 4 + 3].copy_from_slice(&c);
         }
@@ -1431,7 +1465,7 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     let before = doc.data.clone();
     inpaint(&mut doc.data, w, hh, &erase);
     if h.photo {
-        let (frac, busy) = calm_photo(&mut doc.data, w, hh, sc);
+        let (frac, busy) = calm_photo_ex(&mut doc.data, w, hh, sc, h.print && h.print_photo < 2);
         doc.hand.photo = frac;
         if h.print && h.print_photo < 2 && busy.len() == n {
             simplify_photo(&mut doc.data, &busy, h.print_photo);
@@ -1466,6 +1500,11 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
         // Linienfarben bündeln (ähnliche Töne zählen als eine Farbe)
         for l in &doc.hand.lines {
             let cf = l.color.map(|v| v as f64);
+            let lu = 0.299 * cf[0] + 0.587 * cf[1] + 0.114 * cf[2];
+            let len: f64 = l.pts.windows(2).map(|q| (q[1][0] - q[0][0]).hypot(q[1][1] - q[0][1])).sum();
+            if !(lu > 200.0 || lu < 45.0) || len < doc.src_w as f64 * 0.08 {
+                continue;
+            }
             if !need.iter().any(|c| cdist(c.map(|v| v as f64), cf) < 45.0) {
                 need.push(l.color);
             }
@@ -1480,7 +1519,11 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
         if std::env::var_os("ZMN_DEBUG").is_some() {
             eprintln!("    Farben vorher: {:?}, Pflicht {:?}", (0..doc.groups.len()).map(|i| vector::hex(doc.gcol(i))).collect::<Vec<_>>(), keep);
         }
-        limit_colors(doc, h.print_colors, &keep);
+        if h.print_palette.is_empty() {
+            limit_colors(doc, h.print_colors, &keep);
+        } else {
+            map_palette(doc, &h.print_palette);
+        }
         if std::env::var_os("ZMN_DEBUG").is_some() {
             eprintln!("    Farben nachher: {:?}", (0..doc.groups.len()).map(|i| vector::hex(doc.gcol(i))).collect::<Vec<_>>());
         }
@@ -1513,6 +1556,11 @@ fn limit_colors(doc: &mut Doc, n: usize, keep: &[usize]) {
             for &b in &live[ia + 1..] {
                 let (ca, cb) = (doc.gcol(a).map(|v| v as f64), doc.gcol(b).map(|v| v as f64));
                 let wsmall = doc.group_weight(&doc.groups[a]).min(doc.group_weight(&doc.groups[b])) as f64;
+                // dunkle Töne wirken im Druck fast gleich: Abstand zwischen zwei dunklen Farben halbieren
+                let la = 0.299 * ca[0] + 0.587 * ca[1] + 0.114 * ca[2];
+                let lb = 0.299 * cb[0] + 0.587 * cb[1] + 0.114 * cb[2];
+                let dark = if la < 85.0 && lb < 85.0 { 0.5 } else { 1.0 };
+                let cdist = |x: [f64; 3], y: [f64; 3]| cdist(x, y) * dark;
                 // Pflichtfarben (Schrift, Linien) nur notfalls zusammenlegen – dann
                 // nach reinem Farbabstand, damit z. B. Weiß nicht wegen kleiner Fläche verschwindet
                 let nk = keep.contains(&a) as u8 + keep.contains(&b) as u8;
@@ -1540,6 +1588,33 @@ fn limit_colors(doc: &mut Doc, n: usize, keep: &[usize]) {
         doc.groups.remove(b);
         keep = keep.into_iter().filter(|&x| x != b).map(|x| if x > b { x - 1 } else { x }).collect();
     }
+    doc.k = doc.groups.len();
+}
+
+/// Jede Farbgruppe der nächsten vorgegebenen Filamentfarbe zuordnen; gleiche
+/// Filamente werden zu einer Gruppe.
+fn map_palette(doc: &mut Doc, pal: &[[u8; 3]]) {
+    let mut merged: Vec<vector::Group> = Vec::new();
+    let mut slot_of: Vec<Option<usize>> = vec![None; pal.len()];
+    for gi in 0..doc.groups.len() {
+        if doc.groups[gi].transp {
+            merged.push(doc.groups[gi].clone());
+            continue;
+        }
+        let c = doc.gcol(gi).map(|v| v as f64);
+        let pi = (0..pal.len()).min_by(|&a, &b| cdist(c, pal[a].map(|v| v as f64)).partial_cmp(&cdist(c, pal[b].map(|v| v as f64))).unwrap()).unwrap_or(0);
+        match slot_of[pi] {
+            Some(m) => {
+                let src = doc.groups[gi].src.clone();
+                merged[m].src.extend(src);
+            }
+            None => {
+                slot_of[pi] = Some(merged.len());
+                merged.push(vector::Group { src: doc.groups[gi].src.clone(), over: Some(pal[pi]), transp: false });
+            }
+        }
+    }
+    doc.groups = merged;
     doc.k = doc.groups.len();
 }
 

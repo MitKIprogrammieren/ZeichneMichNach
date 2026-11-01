@@ -43,6 +43,17 @@ fn main() {
                     _ => 0,
                 };
             }
+            "--palette" => {
+                i += 1;
+                h.print_palette = args[i]
+                    .split(',')
+                    .filter_map(|c| {
+                        let c = c.trim().trim_start_matches('#');
+                        let v = u32::from_str_radix(c, 16).ok()?;
+                        Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+                    })
+                    .collect();
+            }
             "--grund" => {
                 i += 1;
                 b3.base_mm = args[i].replace(',', ".").parse().unwrap_or(1.6);
