@@ -27,6 +27,21 @@ fn main() {
                 i += 1;
                 k = args[i].parse().unwrap_or(0);
             }
+            "--druck" => {
+                h.print = true;
+                if let Some(v) = args.get(i + 1).and_then(|v| v.replace(',', ".").parse::<f64>().ok()) {
+                    h.print_width_mm = v;
+                    i += 1;
+                }
+            }
+            "--farben" => {
+                i += 1;
+                h.print_colors = args[i].parse().unwrap_or(4);
+            }
+            "--min" => {
+                i += 1;
+                h.print_min_mm = args[i].replace(',', ".").parse().unwrap_or(0.8);
+            }
             "--ohne" => {
                 i += 1;
                 for w in args[i].split(',') {
@@ -45,7 +60,7 @@ fn main() {
         i += 1;
     }
     let Some(input) = input else {
-        eprintln!("Aufruf: zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund]");
+        eprintln!("Aufruf: zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--druck breite_mm] [--farben n] [--min mm]");
         std::process::exit(2);
     };
     let (w, hh, img) = vector::decode_png(&std::fs::read(&input).expect("Bild lesen")).unwrap_or_else(|e| {

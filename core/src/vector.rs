@@ -2982,7 +2982,7 @@ impl Doc {
         }
         a += &format!(" viewBox=\"0 0 {w} {h}\"{}>", if png && !o.aa { " shape-rendering=\"crispEdges\"" } else { "" });
         let mut lines = vec![a];
-        if o.gap && !o.stroke_only {
+        if o.gap && !o.stroke_only && !self.hand.print {
             lines.push(format!(
                 "<g class=\"gap\" fill=\"none\" stroke-width=\"{}\" stroke-linejoin=\"round\"{}>",
                 o.gap_w,
@@ -3265,7 +3265,7 @@ impl Doc {
                 if !o.stroke_only {
                     fill_evenodd(&mut cov, w, h, &polys, ss);
                 }
-                if o.gap && !o.stroke_only {
+                if o.gap && !o.stroke_only && !self.hand.print {
                     let gw = if o.gap_ns { o.gap_w } else { o.gap_w * sx };
                     for p in &polys {
                         stroke_poly(&mut cov, w, h, p, gw, ss);

@@ -19,11 +19,30 @@ pub struct HandOpts {
     pub photo: bool,
     pub gradients: bool,
     pub text: bool,
+    /// Für den 3D-Druck: nur flache Farben, Mindestbreite, keine Spitzen
+    pub print: bool,
+    /// Druckbreite des ganzen Bildes in mm
+    pub print_width_mm: f64,
+    /// schmalste erlaubte Stelle in mm (z. B. 2 Linienbreiten)
+    pub print_min_mm: f64,
+    /// höchstens so viele Farben (AMS)
+    pub print_colors: usize,
 }
 
 impl Default for HandOpts {
     fn default() -> Self {
-        HandOpts { bg_cut: true, bg_tol: 28.0, lines: true, photo: true, gradients: true, text: true }
+        HandOpts {
+            bg_cut: true,
+            bg_tol: 28.0,
+            lines: true,
+            photo: true,
+            gradients: true,
+            text: true,
+            print: false,
+            print_width_mm: 100.0,
+            print_min_mm: 0.8,
+            print_colors: 4,
+        }
     }
 }
 
@@ -63,6 +82,8 @@ pub struct HandResult {
     pub saved: Vec<TextOut>,
     /// tatsächlich verwendete Farbanzahl
     pub k: usize,
+    /// für den 3D-Druck aufbereitet (keine Spaltstriche, nur Flächen)
+    pub print: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1368,11 +1389,287 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     }
     doc.hand.orig = orig;
     doc.q = vector::quantize(&doc.data, w, hh);
-    set_colors(doc, k, h.gradients);
-    doc.apply_map(o);
-    doc.vectorize(o);
+    set_colors(doc, k, h.gradients || h.print);
     doc.hand.saved = texts.to_vec();
-    add_texts_and_gradients(doc, h);
+    map_and_trace(doc, o, h);
+}
+
+/// Zuordnung, ggf. Druckaufbereitung, Pfade, dann Text und Verläufe.
+fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
+    doc.hand.print = h.print;
+    if h.print {
+        limit_colors(doc, h.print_colors);
+    }
+    doc.apply_map(o);
+    if h.print {
+        print_fix(doc, h);
+    }
+    doc.vectorize(o);
+    if h.print {
+        doc.hand.texts = doc.hand.saved.iter().filter(|t| !t.shapes.is_empty()).count();
+        doc.hand.grads.clear();
+    } else {
+        add_texts_and_gradients(doc, h);
+    }
+}
+
+/// Farbanzahl auf höchstens n begrenzen: ähnlichste Gruppen zusammenlegen
+/// (kleine Gruppen zuerst, gewichtet nach Fläche).
+fn limit_colors(doc: &mut Doc, n: usize) {
+    let n = n.max(1);
+    loop {
+        let live: Vec<usize> = (0..doc.groups.len()).filter(|&i| !doc.groups[i].transp).collect();
+        if live.len() <= n {
+            break;
+        }
+        let mut best: Option<(f64, usize, usize)> = None;
+        for (ia, &a) in live.iter().enumerate() {
+            for &b in &live[ia + 1..] {
+                let (ca, cb) = (doc.gcol(a).map(|v| v as f64), doc.gcol(b).map(|v| v as f64));
+                let wsmall = doc.group_weight(&doc.groups[a]).min(doc.group_weight(&doc.groups[b])) as f64;
+                let cost = cdist(ca, cb) * (wsmall + 1.0).sqrt();
+                if best.map(|x| cost < x.0).unwrap_or(true) {
+                    best = Some((cost, a, b));
+                }
+            }
+        }
+        let Some((_, a, b)) = best else { break };
+        let src = std::mem::take(&mut doc.groups[b].src);
+        doc.groups[a].src.extend(src);
+        doc.groups.remove(b);
+    }
+    doc.k = doc.groups.len();
+}
+
+/// Abstand zum nächsten Pixel außerhalb der Maske (Fasen-Abstand 3/4, in Pixeln).
+fn dist_in(m: &[bool], w: usize, h: usize) -> Vec<f32> {
+    let big = 1e9f32;
+    let mut d: Vec<f32> = m.iter().map(|&b| if b { big } else { 0.0 }).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let p = y * w + x;
+            if d[p] == 0.0 {
+                continue;
+            }
+            let mut v = d[p];
+            if x == 0 || y == 0 {
+                v = v.min(1.0);
+            }
+            if x > 0 {
+                v = v.min(d[p - 1] + 1.0);
+            }
+            if y > 0 {
+                v = v.min(d[p - w] + 1.0);
+                if x > 0 {
+                    v = v.min(d[p - w - 1] + 1.4142);
+                }
+                if x + 1 < w {
+                    v = v.min(d[p - w + 1] + 1.4142);
+                }
+            }
+            d[p] = v;
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            let p = y * w + x;
+            if d[p] == 0.0 {
+                continue;
+            }
+            let mut v = d[p];
+            if x + 1 == w || y + 1 == h {
+                v = v.min(1.0);
+            }
+            if x + 1 < w {
+                v = v.min(d[p + 1] + 1.0);
+            }
+            if y + 1 < h {
+                v = v.min(d[p + w] + 1.0);
+                if x + 1 < w {
+                    v = v.min(d[p + w + 1] + 1.4142);
+                }
+                if x > 0 {
+                    v = v.min(d[p + w - 1] + 1.4142);
+                }
+            }
+            d[p] = v;
+        }
+    }
+    d
+}
+
+/// Öffnen mit rundem Werkzeug: entfernt alles schmaler als 2r und rundet Spitzen.
+fn open_round(m: &[bool], w: usize, h: usize, r: f32) -> Vec<bool> {
+    let d = dist_in(m, w, h);
+    let core: Vec<bool> = d.iter().map(|&v| v > r).collect();
+    let inv: Vec<bool> = core.iter().map(|&b| !b).collect();
+    let dc = dist_in(&inv, w, h);
+    (0..w * h).map(|p| m[p] && (core[p] || dc[p] <= r + 0.5)).collect()
+}
+
+fn dilate_round(m: &[bool], w: usize, h: usize, r: f32) -> Vec<bool> {
+    let inv: Vec<bool> = m.iter().map(|&b| !b).collect();
+    let d = dist_in(&inv, w, h);
+    (0..w * h).map(|p| m[p] || d[p] <= r).collect()
+}
+
+/// Aufbereitung für den 3D-Druck: Linien und Text als Flächen mit
+/// Mindeststärke einbrennen, dann jede Farbe rund öffnen – schmale Streifen,
+/// Splitter und Spitzen verschwinden, die Lücken füllt die Nachbarfarbe.
+fn print_fix(doc: &mut Doc, h: &HandOpts) {
+    let (w, hh, sc) = (doc.w, doc.h, doc.sc);
+    let n = w * hh;
+    if doc.g.len() != n || n == 0 {
+        return;
+    }
+    // Analysepixel je mm
+    let ppm = w as f64 / h.print_width_mm.max(1.0);
+    let rmin = (h.print_min_mm * ppm / 2.0).max(0.6) as f32;
+    // Linien einbrennen (mindestens so breit wie erlaubt)
+    let lines = std::mem::take(&mut doc.hand.lines);
+    if std::env::var_os("ZMN_DEBUG").is_some() {
+        eprintln!("    Druck: {} Linien einbrennen, rmin {:.1} px", lines.len(), rmin);
+    }
+    for ln in &lines {
+        let pts: Vec<Pt> = ln.pts.iter().map(|q| [q[0] * sc, q[1] * sc]).collect();
+        let mut cov = vec![0f32; n];
+        stroke_line(&mut cov, w, hh, &pts, ln.closed, (ln.width * sc).max(2.0 * rmin as f64 + 1.0), 1);
+        let gi = nearest_group_ex(doc, ln.color, false) as i16;
+        if std::env::var_os("ZMN_DEBUG").is_some() {
+            eprintln!("      Linie {} -> Gruppe {} {}", vector::hex(ln.color), gi, vector::hex(doc.gcol(gi as usize)));
+        }
+        for p in 0..n {
+            if cov[p] >= 0.5 && doc.g[p] >= 0 {
+                doc.g[p] = gi;
+            }
+        }
+    }
+    // Text einbrennen, dünne Striche verstärken
+    let saved = doc.hand.saved.clone();
+    for t in &saved {
+        if t.shapes.is_empty() {
+            continue;
+        }
+        let polys: Vec<Vec<Pt>> = t.shapes.iter().flat_map(|sp| flatten(sp, 0.4)).map(|p| p.into_iter().map(|q| [q[0] * sc, q[1] * sc]).collect()).collect();
+        let mut cov = vec![0f32; n];
+        fill_evenodd(&mut cov, w, hh, &polys, 2);
+        let m2: Vec<bool> = cov.iter().map(|&v| v >= 0.5).collect();
+        let gi = nearest_group_ex(doc, t.color, false) as i16;
+        for p in 0..n {
+            if m2[p] && doc.g[p] >= 0 {
+                doc.g[p] = gi;
+            }
+        }
+    }
+    // jede Farbe (auch transparent) rund öffnen
+    for _pass in 0..2 {
+        let mut labels: Vec<i16> = doc.g.clone();
+        labels.sort();
+        labels.dedup();
+        let mut orphan = vec![false; n];
+        // lange, schmale Teile (Linien, dünne Schrift, Rahmen) werden verbreitert
+        // statt entfernt; kurze Splitter und Spitzen gehen an die Nachbarfarbe
+        let mut thicken: Vec<(Vec<usize>, i16, f32)> = Vec::new();
+        for &lab in &labels {
+            let m: Vec<bool> = doc.g.iter().map(|&v| v == lab).collect();
+            let keep = open_round(&m, w, hh, rmin);
+            let rem: Vec<bool> = (0..n).map(|p| m[p] && !keep[p]).collect();
+            if !rem.iter().any(|&b| b) {
+                continue;
+            }
+            let din = dist_in(&m, w, hh);
+            let mut seen = vec![false; n];
+            for st in 0..n {
+                if !rem[st] || seen[st] {
+                    continue;
+                }
+                let mut comp = vec![st];
+                seen[st] = true;
+                let mut i = 0;
+                while i < comp.len() {
+                    let p = comp[i];
+                    i += 1;
+                    let (x, y) = (p % w, p / w);
+                    for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
+                        let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                        if xx < 0 || yy < 0 || xx >= w as i64 || yy >= hh as i64 {
+                            continue;
+                        }
+                        let q = yy as usize * w + xx as usize;
+                        if rem[q] && !seen[q] {
+                            seen[q] = true;
+                            comp.push(q);
+                        }
+                    }
+                }
+                let half = comp.iter().map(|&p| din[p]).fold(0.0f32, f32::max).max(0.5);
+                let len = comp.len() as f32 / (2.0 * half);
+                // durchsichtige Teile werden nie verbreitert (nur Löcher füllen)
+                if lab >= 0 && len >= 6.0 * rmin {
+                    thicken.push((comp.clone(), lab, (rmin - half + 0.7).max(0.0)));
+                }
+                for p in comp {
+                    orphan[p] = true;
+                }
+            }
+        }
+        if !orphan.iter().any(|&b| b) {
+            break;
+        }
+        // Waisen von außen nach innen mit der häufigsten Nachbarfarbe füllen
+        let mut guard = 0;
+        while orphan.iter().any(|&b| b) && guard < 200 {
+            guard += 1;
+            let mut fill = Vec::new();
+            for y in 0..hh {
+                for x in 0..w {
+                    let p = y * w + x;
+                    if !orphan[p] {
+                        continue;
+                    }
+                    let mut cnt: Vec<(i16, u8)> = Vec::new();
+                    for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
+                        let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                        if xx < 0 || yy < 0 || xx >= w as i64 || yy >= hh as i64 {
+                            continue;
+                        }
+                        let q = yy as usize * w + xx as usize;
+                        if orphan[q] {
+                            continue;
+                        }
+                        match cnt.iter_mut().find(|c| c.0 == doc.g[q]) {
+                            Some(c) => c.1 += 1,
+                            None => cnt.push((doc.g[q], 1)),
+                        }
+                    }
+                    if let Some(&(v, _)) = cnt.iter().max_by_key(|c| c.1) {
+                        fill.push((p, v));
+                    }
+                }
+            }
+            if fill.is_empty() {
+                break;
+            }
+            for (p, v) in fill {
+                doc.g[p] = v;
+                orphan[p] = false;
+            }
+        }
+        // verbreiterte Teile wieder einsetzen
+        for (comp, lab, grow) in thicken {
+            let mut m = vec![false; n];
+            for p in comp {
+                m[p] = true;
+            }
+            let m = dilate_round(&m, w, hh, grow);
+            for p in 0..n {
+                if m[p] && doc.g[p] >= 0 {
+                    doc.g[p] = lab;
+                }
+            }
+        }
+    }
+    doc.hand.lines.clear();
 }
 
 /// Farbanzahl setzen (0 = automatisch, für Logos etwas reichlicher).
@@ -1447,10 +1744,15 @@ pub fn refresh(doc: &mut Doc, o: &Opts, h: &HandOpts, k: usize, stage: u8) {
     }
     if stage <= 1 {
         doc.q = vector::quantize(&doc.data, doc.w, doc.h);
-        set_colors(doc, k, h.gradients);
+        set_colors(doc, k, h.gradients || h.print);
     }
-    if stage <= 2 {
-        doc.apply_map(o);
+    if stage <= 2 || h.print {
+        // Druckaufbereitung braucht die Zuordnung (und die ursprünglichen Linien)
+        if h.print && doc.hand.lines.is_empty() && stage > 0 {
+            // Linien wurden beim letzten Mal eingebrannt – bleiben über die Zuordnung erhalten
+        }
+        map_and_trace(doc, o, h);
+        return;
     }
     doc.vectorize(o);
     add_texts_and_gradients(doc, h);
@@ -1458,6 +1760,10 @@ pub fn refresh(doc: &mut Doc, o: &Opts, h: &HandOpts, k: usize, stage: u8) {
 
 /// Passende Farbgruppe für eine Farbe (oder neue Gruppe mit fester Farbe).
 fn nearest_group(doc: &mut Doc, c: [u8; 3]) -> usize {
+    nearest_group_ex(doc, c, true)
+}
+
+fn nearest_group_ex(doc: &mut Doc, c: [u8; 3], allow_new: bool) -> usize {
     let cf = [c[0] as f64, c[1] as f64, c[2] as f64];
     let mut best = (f64::MAX, 0usize);
     for gi in 0..doc.groups.len() {
@@ -1470,7 +1776,7 @@ fn nearest_group(doc: &mut Doc, c: [u8; 3]) -> usize {
             best = (dd, gi);
         }
     }
-    if best.0 < 14.0 {
+    if best.0 < 14.0 || !allow_new {
         return best.1;
     }
     doc.groups.push(vector::Group { src: Vec::new(), over: Some(c), transp: false });
