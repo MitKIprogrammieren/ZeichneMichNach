@@ -9,6 +9,7 @@ pub mod compare;
 pub mod engines;
 pub mod export3mf;
 pub mod external;
+pub mod hand;
 pub mod hollow;
 pub mod inspect;
 pub mod io;

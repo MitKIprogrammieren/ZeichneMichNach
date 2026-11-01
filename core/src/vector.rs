@@ -170,6 +170,8 @@ pub struct Doc {
     pub layers: Vec<Layer>,
     /// Anzahl symmetrisch gemachter Formen der letzten Vektorisierung
     pub nsym: usize,
+    /// Zusatzergebnisse von „Nachzeichnen wie von Hand“ (Verläufe, Linien, Text)
+    pub hand: crate::hand::HandResult,
 }
 
 fn wd(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -2997,18 +2999,61 @@ impl Doc {
         } else {
             String::new()
         };
+        // Farbverläufe
+        let use_grad = !o.stroke_only && !o.svg_tiny && !self.hand.grads.is_empty();
+        let mut gmap: HashMap<(usize, usize), usize> = HashMap::new();
+        if use_grad {
+            lines.push("<defs>".into());
+            for (gi, g) in self.hand.grads.iter().enumerate() {
+                gmap.insert((g.layer, g.sub), gi);
+                lines.push(format!(
+                    "<linearGradient id=\"verlauf-{}\" gradientUnits=\"userSpaceOnUse\" x1=\"{}\" y1=\"{}\" x2=\"{}\" y2=\"{}\">",
+                    gi + 1, r2(g.p1[0]), r2(g.p1[1]), r2(g.p2[0]), r2(g.p2[1])
+                ));
+                for (f, c) in &g.stops {
+                    lines.push(format!("<stop offset=\"{}\" stop-color=\"{}\"/>", r2(*f), hex(*c)));
+                }
+                lines.push("</linearGradient>".into());
+            }
+            lines.push("</defs>".into());
+        }
         for (i, l) in self.layers.iter().enumerate() {
             let fill = if o.stroke_only { "none".to_string() } else { self.col_of(l.idx) };
+            let flat: Vec<&Shape> = l.subs.iter().enumerate().filter(|(si, _)| !gmap.contains_key(&(i, *si))).map(|x| x.1).collect();
             if o.group_by_color {
                 lines.push(format!("<g id=\"farbe-{}\">", i + 1));
-                let d: String = l.subs.iter().map(sp_d).collect();
-                lines.push(format!("<path fill=\"{fill}\" fill-rule=\"evenodd\"{st} d=\"{d}\"/>"));
-                lines.push("</g>".into());
+                let d: String = flat.iter().map(|sp| sp_d(sp)).collect();
+                if !d.is_empty() {
+                    lines.push(format!("<path fill=\"{fill}\" fill-rule=\"evenodd\"{st} d=\"{d}\"/>"));
+                }
             } else {
-                for sp in &l.subs {
+                for sp in &flat {
                     lines.push(format!("<path fill=\"{fill}\"{st} fill-rule=\"evenodd\" d=\"{}\"/>", sp_d(sp)));
                 }
             }
+            for (si, sp) in l.subs.iter().enumerate() {
+                if let Some(gi) = gmap.get(&(i, si)) {
+                    lines.push(format!("<path fill=\"url(#verlauf-{})\" fill-rule=\"evenodd\"{st} d=\"{}\"/>", gi + 1, sp_d(sp)));
+                }
+            }
+            if o.group_by_color {
+                lines.push("</g>".into());
+            }
+        }
+        // feine Linien als Striche
+        if !self.hand.lines.is_empty() {
+            lines.push("<g id=\"linien\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\">".into());
+            for ln in &self.hand.lines {
+                let mut d = String::new();
+                for (k, p) in ln.pts.iter().enumerate() {
+                    d += &format!("{}{} {}", if k == 0 { "M" } else { "L" }, r2(p[0]), r2(p[1]));
+                }
+                if ln.closed {
+                    d += "Z";
+                }
+                lines.push(format!("<path stroke=\"{}\" stroke-width=\"{}\" d=\"{d}\"/>", hex(ln.color), r2(ln.width)));
+            }
+            lines.push("</g>".into());
         }
         lines.push("</svg>".into());
         lines.join("\n")
@@ -3190,10 +3235,23 @@ impl Doc {
         let mut out = vec![0u8; w * h * 4];
         let (sx, sy) = (w as f64 / self.src_w.max(1) as f64, h as f64 / self.src_h.max(1) as f64);
         let ss = if o.aa { 5 } else { 1 };
-        for l in &self.layers {
+        let grads: HashMap<(usize, usize), &crate::hand::Grad> = if wire.is_none() && !o.stroke_only { self.hand.grads.iter().map(|g| ((g.layer, g.sub), g)).collect() } else { HashMap::new() };
+        for (li, l) in self.layers.iter().enumerate() {
+            // Teilformen mit Verlauf einzeln mit Farbe je Pixel zeichnen
+            for (si, sp) in l.subs.iter().enumerate() {
+                if let Some(g) = grads.get(&(li, si)) {
+                    let polys: Vec<Vec<Pt>> = flatten(sp, 0.35 / sx.max(1e-6)).into_iter().map(|p| p.iter().map(|q| [q[0] * sx, q[1] * sy]).collect()).collect();
+                    let mut cov = vec![0f32; w * h];
+                    fill_evenodd(&mut cov, w, h, &polys, ss);
+                    composite_with(&mut out, &cov, w, |x, y| crate::hand::grad_color(g, [(x as f64 + 0.5) / sx, (y as f64 + 0.5) / sy]));
+                }
+            }
             let col = if let Some(c) = wire { c } else { self.gcol(l.idx) };
             let mut polys: Vec<Vec<Pt>> = Vec::new();
-            for sp in &l.subs {
+            for (si, sp) in l.subs.iter().enumerate() {
+                if grads.contains_key(&(li, si)) {
+                    continue;
+                }
                 for p in flatten(sp, 0.35 / sx.max(1e-6)) {
                     polys.push(p.iter().map(|q| [q[0] * sx, q[1] * sy]).collect());
                 }
@@ -3221,6 +3279,14 @@ impl Doc {
                     stroke_poly(&mut sc, w, h, p, o.stroke_w * sx, ss);
                 }
                 composite(&mut out, &sc, o.stroke_color);
+            }
+        }
+        if wire.is_none() {
+            for ln in &self.hand.lines {
+                let pts: Vec<Pt> = ln.pts.iter().map(|q| [q[0] * sx, q[1] * sy]).collect();
+                let mut cov = vec![0f32; w * h];
+                crate::hand::stroke_line(&mut cov, w, h, &pts, ln.closed, (ln.width * sx).max(0.6), ss);
+                composite(&mut out, &cov, ln.color);
             }
         }
         out
@@ -3372,6 +3438,25 @@ pub fn extrude_rings(rings: &[Vec<Pt>], z0: f64, z1: f64) -> (Vec<crate::math::V
         }
     }
     (verts, tris)
+}
+
+fn composite_with(out: &mut [u8], cov: &[f32], w: usize, col: impl Fn(usize, usize) -> [u8; 3]) {
+    for (p, &a) in cov.iter().enumerate() {
+        if a <= 0.0 {
+            continue;
+        }
+        let c = col(p % w, p / w);
+        let a = a.min(1.0);
+        let j = p * 4;
+        let da = out[j + 3] as f32 / 255.0;
+        let oa = a + da * (1.0 - a);
+        for k in 0..3 {
+            let dc = out[j + k] as f32 / 255.0 * da;
+            let v = (c[k] as f32 / 255.0 * a + dc * (1.0 - a)) / oa.max(1e-6);
+            out[j + k] = (v * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+        out[j + 3] = (oa * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
 }
 
 fn composite(out: &mut [u8], cov: &[f32], c: [u8; 3]) {
