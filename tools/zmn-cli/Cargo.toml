@@ -1,0 +1,19 @@
+[package]
+name = "zmn-cli"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "ZeichneMichNach auf der Kommandozeile (auch für Tests)"
+
+[workspace]
+
+[[bin]]
+name = "zmn"
+path = "src/main.rs"
+
+[dependencies]
+nz-core = { path = "../../core" }
+ttf-parser = "0.25"
+
+[profile.release]
+opt-level = 3

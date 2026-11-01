@@ -713,6 +713,17 @@ pub struct TextAnalysis {
     /// gefunden: ein Abschnitt je sichtbarem Zeichen; sonst die ganze Zeile als ein Abschnitt
     pub segs: Vec<TextSeg>,
     pub per_char: bool,
+    /// Zeichen der Zeile (ohne Leerzeichen)
+    pub chars: Vec<char>,
+    /// Tintenmaske der ganzen Zeile (Analysepixel) mit Lage im Analysebild
+    pub lmask: Vec<bool>,
+    pub lw: usize,
+    pub lh: usize,
+    pub lx: usize,
+    pub ly: usize,
+    pub sc: f64,
+    /// feine Zerlegung in Spaltenbereiche (Bausteine; ein Zeichen kann mehrere umfassen)
+    pub atoms: Vec<(usize, usize)>,
     /// Maske der ganzen Zeile (Analysepixel, global)
     pub erase: Vec<usize>,
 }
@@ -795,9 +806,11 @@ pub fn analyze_text(doc: &Doc, line: &TextLine) -> Option<TextAnalysis> {
     }
     let tk = if border[0] <= border[1] { 0u8 } else { 1u8 };
     let mut m: Vec<bool> = lab.iter().map(|&v| v == tk).collect();
-    // Splitter entfernen
+    // Splitter entfernen: winzige Teile, große Randflächen und kleine Randstücke
+    // außerhalb des Schriftbands (z. B. Kanten von Nachbarformen in der Box)
     {
         let mut seen = vec![false; bw * bh];
+        let mut comps: Vec<(Vec<usize>, usize, usize, bool)> = Vec::new(); // Pixel, oben, unten, berührt Rand
         for s in 0..bw * bh {
             if !m[s] || seen[s] {
                 continue;
@@ -818,12 +831,32 @@ pub fn analyze_text(doc: &Doc, line: &TextLine) -> Option<TextAnalysis> {
                 }
             }
             let touches = comp.iter().any(|&p| p % bw == 0 || p % bw == bw - 1 || p / bw == 0 || p / bw == bh - 1);
-            if comp.len() < 6 || (touches && comp.len() > bw * bh / 4) {
+            let top = comp.iter().map(|&p| p / bw).min().unwrap_or(0);
+            let bot = comp.iter().map(|&p| p / bw).max().unwrap_or(0) + 1;
+            comps.push((comp, top, bot, touches));
+        }
+        // Schriftband aus den großen Teilen (Höhe ≥ 45 % der höchsten)
+        let hmax = comps.iter().map(|c| c.2 - c.1).max().unwrap_or(0);
+        let big: Vec<&(Vec<usize>, usize, usize, bool)> = comps.iter().filter(|c| (c.2 - c.1) * 100 >= hmax * 45 && !c.3).collect();
+        let (bt, bb) = if big.is_empty() { (0, bh) } else { (big.iter().map(|c| c.1).min().unwrap(), big.iter().map(|c| c.2).max().unwrap()) };
+        let band = (bb - bt).max(1);
+        for (comp, top, bot, touches) in comps {
+            let h = bot - top;
+            let small = h * 2 < band;
+            let outside = bot <= bt + band / 5 || top + band / 5 >= bb;
+            let drop = comp.len() < 6 || (touches && comp.len() > bw * bh / 4) || (touches && small && outside) || (touches && h * 4 < band);
+            if drop {
                 for p in comp {
                     m[p] = false;
                 }
             }
         }
+    }
+    if let Some(dir) = std::env::var_os("ZMN_DEBUG_DIR") {
+        let mut pgm = format!("P5 {bw} {bh} 255\n").into_bytes();
+        pgm.extend(m.iter().map(|&b| if b { 255u8 } else { 0 }));
+        let name: String = line.text.chars().filter(|c| c.is_alphanumeric()).collect();
+        let _ = std::fs::write(std::path::Path::new(&dir).join(format!("maske-{name}.pgm")), pgm);
     }
     // Spaltenprojektion
     let cols: Vec<bool> = (0..bw).map(|x| (0..bh).any(|y| m[y * bw + x])).collect();
@@ -844,18 +877,90 @@ pub fn analyze_text(doc: &Doc, line: &TextLine) -> Option<TextAnalysis> {
         return None;
     }
     let chars: Vec<char> = line.text.chars().filter(|c| !c.is_whitespace()).collect();
+    // feine Zerlegung: an dünnen Stellen (lokale Minima der Spaltenfüllung) trennen.
+    // Das zerschneidet auch mal ein O – die Schriftsuche setzt die Teile wieder zusammen.
+    let colcnt: Vec<usize> = (0..bw).map(|x| (0..bh).filter(|&y| m[y * bw + x]).count()).collect();
+    let line_h = {
+        let rows: Vec<usize> = (0..bh).filter(|&y| (0..bw).any(|x| m[y * bw + x])).collect();
+        if rows.is_empty() { bh } else { rows[rows.len() - 1] - rows[0] + 1 }
+    };
+    let mut atoms: Vec<(usize, usize)> = Vec::new();
+    let minw = (line_h / 7).max(2);
+    for &(a, b) in &runs {
+        let mut start = a;
+        let mut x = a + minw;
+        while x + minw < b {
+            let c = colcnt[x];
+            let (wa, wb) = (x.saturating_sub(minw).max(a), (x + minw + 1).min(b));
+            let wmin = colcnt[wa..wb].iter().copied().min().unwrap_or(c);
+            let wmax = colcnt[wa..wb].iter().copied().max().unwrap_or(c);
+            // nur echte Täler: tiefste Stelle im Umfeld, deutlich unter den Nachbarn
+            if c == wmin && (c as f64) <= line_h as f64 * 0.2 && (c as f64) * 1.8 <= wmax as f64 {
+                atoms.push((start, x));
+                start = x;
+                x += minw;
+            } else {
+                x += 1;
+            }
+        }
+        atoms.push((start, b));
+    }
     // zu viele Abschnitte: kleinste Lücken schließen
     while runs.len() > chars.len() && runs.len() > 1 {
         let (i, _) = runs.windows(2).enumerate().map(|(i, r)| (i, r[1].0 - r[0].1)).min_by_key(|x| x.1).unwrap();
         runs[i].1 = runs[i + 1].1;
         runs.remove(i + 1);
     }
-    let per_char = runs.len() == chars.len();
-    if !per_char {
+    // Zeichen auf die Abschnitte verteilen (berührende Buchstaben bilden einen
+    // gemeinsamen Abschnitt): dynamische Zuordnung nach geschätzter Breite
+    let est = |c: char| -> f64 {
+        match c {
+            'I' | 'i' | 'l' | '1' | '.' | ',' | ':' | ';' | '!' | '|' | '\'' | 'j' => 0.3,
+            'M' | 'W' | 'm' | 'w' | '@' => 0.9,
+            'r' | 't' | 'f' | 'J' => 0.45,
+            _ => 0.62,
+        }
+    };
+    let nr = runs.len();
+    let nc = chars.len();
+    let tot_r: f64 = runs.iter().map(|r| (r.1 - r.0) as f64).sum();
+    let tot_c: f64 = chars.iter().map(|&c| est(c)).sum();
+    let mut groups: Vec<(usize, usize)> = Vec::new(); // Zeichenbereich je Abschnitt
+    if nc >= nr && nr > 0 && tot_r > 0.0 && tot_c > 0.0 {
+        let inf = f64::MAX / 4.0;
+        let mut dp = vec![vec![inf; nr + 1]; nc + 1];
+        let mut from = vec![vec![0usize; nr + 1]; nc + 1];
+        dp[0][0] = 0.0;
+        for j in 1..=nr {
+            let rw = (runs[j - 1].1 - runs[j - 1].0) as f64 / tot_r;
+            for i in j..=nc {
+                let mut cw = 0.0;
+                for a in (j - 1..i).rev() {
+                    cw += est(chars[a]) / tot_c;
+                    if dp[a][j - 1] >= inf {
+                        continue;
+                    }
+                    let c = dp[a][j - 1] + (rw - cw).powi(2) / rw.max(0.01);
+                    if c < dp[i][j] {
+                        dp[i][j] = c;
+                        from[i][j] = a;
+                    }
+                }
+            }
+        }
+        let mut i = nc;
+        for j in (1..=nr).rev() {
+            let a = from[i][j];
+            groups.push((a, i));
+            i = a;
+        }
+        groups.reverse();
+    } else {
         runs = vec![(runs[0].0, runs[runs.len() - 1].1)];
+        groups.push((0, nc));
     }
-    let mut segs = Vec::new();
-    for (ri, &(a, b)) in runs.iter().enumerate() {
+    let per_char = groups.iter().all(|g| g.1 - g.0 == 1);
+    let cut = |a: usize, b: usize| -> Option<TextSeg> {
         let (mut ya, mut yb) = (bh, 0);
         for y in 0..bh {
             if (a..b).any(|x| m[y * bw + x]) {
@@ -864,7 +969,7 @@ pub fn analyze_text(doc: &Doc, line: &TextLine) -> Option<TextAnalysis> {
             }
         }
         if yb <= ya {
-            continue;
+            return None;
         }
         let (mw, mh) = (b - a, yb - ya);
         let mut mask = vec![false; mw * mh];
@@ -874,8 +979,15 @@ pub fn analyze_text(doc: &Doc, line: &TextLine) -> Option<TextAnalysis> {
             }
         }
         let ink = [(x0 + a) as f64 / sc, (y0 + ya) as f64 / sc, (x0 + b) as f64 / sc, (y0 + yb) as f64 / sc];
-        let ch = if per_char { chars[ri].to_string() } else { chars.iter().collect() };
-        segs.push(TextSeg { chars: ch, ink, mw, mh, mask });
+        Some(TextSeg { chars: String::new(), ink, mw, mh, mask })
+    };
+    let mut segs = Vec::new();
+    for (ri, &(a, b)) in runs.iter().enumerate() {
+        if let Some(mut sg) = cut(a, b) {
+            let g = groups[ri];
+            sg.chars = chars[g.0..g.1].iter().collect();
+            segs.push(sg);
+        }
     }
     // zu übermalende Pixel: Tinte etwas erweitert
     let grown = morph_mask(&m, bw, bh, 2, true);
@@ -888,29 +1000,70 @@ pub fn analyze_text(doc: &Doc, line: &TextLine) -> Option<TextAnalysis> {
         bg: [bc[0] as u8, bc[1] as u8, bc[2] as u8],
         segs,
         per_char,
+        chars,
+        lmask: m.clone(),
+        lw: bw,
+        lh: bh,
+        lx: x0,
+        ly: y0,
+        sc,
+        atoms,
         erase,
     })
 }
 
-/// Polygone (in Maskenpixeln) rastern und mit der Maske vergleichen (Schnitt/Vereinigung).
+/// Polygone (in Maskenpixeln) rastern und mit der Maske vergleichen.
+/// Wert 0…1: F-Maß aus Genauigkeit und Abdeckung mit 1 Pixel Toleranz –
+/// so werden auch dünne Schriften fair bewertet.
 pub fn mask_iou(mask: &[bool], mw: usize, mh: usize, polys: &[Vec<Pt>]) -> f64 {
     let mut cov = vec![0f32; mw * mh];
     fill_evenodd(&mut cov, mw, mh, polys, 2);
-    let (mut i, mut u) = (0usize, 0usize);
-    for p in 0..mw * mh {
-        let a = mask[p];
-        let b = cov[p] >= 0.5;
-        if a && b {
-            i += 1;
+    let g: Vec<bool> = cov.iter().map(|&v| v >= 0.5).collect();
+    let dil = |m: &[bool]| -> Vec<bool> {
+        let mut o = m.to_vec();
+        for y in 0..mh {
+            for x in 0..mw {
+                if m[y * mw + x] {
+                    continue;
+                }
+                let mut hit = false;
+                for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1)] {
+                    let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                    if xx >= 0 && yy >= 0 && xx < mw as i64 && yy < mh as i64 && m[yy as usize * mw + xx as usize] {
+                        hit = true;
+                        break;
+                    }
+                }
+                o[y * mw + x] = hit;
+            }
         }
-        if a || b {
-            u += 1;
+        o
+    };
+    let (dm, dg) = (dil(mask), dil(&g));
+    let (mut gp, mut gin, mut mp, mut min_) = (0usize, 0usize, 0usize, 0usize);
+    for p in 0..mw * mh {
+        if g[p] {
+            gp += 1;
+            if dm[p] {
+                gin += 1;
+            }
+        }
+        if mask[p] {
+            mp += 1;
+            if dg[p] {
+                min_ += 1;
+            }
         }
     }
-    if u == 0 {
+    if gp == 0 || mp == 0 {
+        return 0.0;
+    }
+    let (pr, rc) = (gin as f64 / gp as f64, min_ as f64 / mp as f64);
+    if pr + rc <= 0.0 {
         0.0
     } else {
-        i as f64 / u as f64
+        // etwas strenger als das reine F-Maß, damit Unterschiede deutlicher werden
+        (2.0 * pr * rc / (pr + rc)).powi(2)
     }
 }
 
