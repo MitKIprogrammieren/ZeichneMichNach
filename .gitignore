@@ -5,3 +5,4 @@ app/target/
 ki-daten/
 tools/zmn-ki/.venv/
 training.log
+__pycache__/
