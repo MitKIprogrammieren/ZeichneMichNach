@@ -359,28 +359,85 @@ fn main() {
                         json(req, 200, "{\"laeuft\":true}".into());
                     }
                     (Method::Post, "/api/referenz") => {
-                        // eigenes Referenzbild (Original) oder fremde SVG dazu in den Prüfstand legen
+                        // eigene Referenzbilder in den Prüfstand legen: einzelne Datei (Name aus der
+                        // Anfrage) oder ZIP mit beliebig vielen Bildern/SVGs (Namen aus dem Archiv)
                         let mut req = req;
                         let q = query(&url);
-                        let name: String = q.get("name").cloned().unwrap_or_default().chars().filter(|c| c.is_alphanumeric() || "-_ ".contains(*c)).collect::<String>().trim().replace(' ', "_");
-                        let ext = match q.get("art").map(|s| s.as_str()) {
-                            Some("svg") => "svg",
-                            Some("jpg") | Some("jpeg") => "jpg",
-                            Some("webp") => "webp",
-                            _ => "png",
-                        };
                         let mut body = Vec::new();
-                        let _ = req.as_reader().take(MAX_UPLOAD as u64).read_to_end(&mut body);
-                        if name.is_empty() || body.is_empty() {
-                            fehler(req, 400, "Name oder Datei fehlt");
+                        let _ = req.as_reader().take(400 * 1024 * 1024).read_to_end(&mut body);
+                        if body.is_empty() {
+                            fehler(req, 400, "Keine Datei empfangen");
                             continue;
                         }
                         let dir = daten.join("pruefstand/referenzen");
                         let _ = std::fs::create_dir_all(&dir);
-                        match std::fs::write(dir.join(format!("{name}.{ext}")), &body) {
-                            Ok(_) => json(req, 200, format!("{{\"ok\":true,\"datei\":{}}}", quote(&format!("{name}.{ext}")))),
-                            Err(e) => fehler(req, 500, &e.to_string()),
+                        let mut gespeichert: Vec<String> = Vec::new();
+                        let mut ablegen = |name: &str, data: &[u8]| {
+                            let datei = name.rsplit(['/', '\\']).next().unwrap_or(name);
+                            if datei.starts_with('.') {
+                                return;
+                            }
+                            let (stem, ext) = datei.rsplit_once('.').unwrap_or((datei, ""));
+                            let ext = match ext.to_lowercase().as_str() {
+                                "svg" => "svg",
+                                "jpg" | "jpeg" => "jpg",
+                                "png" => "png",
+                                "webp" => "webp",
+                                _ => return,
+                            };
+                            let stem: String = stem.chars().filter(|c| c.is_alphanumeric() || "-_ ".contains(*c)).collect::<String>().trim().replace(' ', "_");
+                            if stem.is_empty() {
+                                return;
+                            }
+                            let f = format!("{stem}.{ext}");
+                            if std::fs::write(dir.join(&f), data).is_ok() {
+                                gespeichert.push(f);
+                            }
+                        };
+                        let name = q.get("name").cloned().unwrap_or_default();
+                        if name.to_lowercase().ends_with(".zip") || body.starts_with(b"PK\x03\x04") {
+                            match nz_core::zip::ZipArchive::read(&body) {
+                                Ok(z) => {
+                                    for (n, d) in &z.files {
+                                        if !n.starts_with("__MACOSX") && !n.ends_with('/') {
+                                            ablegen(n, d);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    fehler(req, 400, &e);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            ablegen(&name, &body);
                         }
+                        drop(ablegen);
+                        if gespeichert.is_empty() {
+                            fehler(req, 400, "Keine Bilder oder SVGs gefunden (PNG, JPG, WebP, SVG)");
+                        } else {
+                            json(req, 200, format!("{{\"ok\":true,\"dateien\":[{}]}}", gespeichert.iter().map(|f| quote(f)).collect::<Vec<_>>().join(",")));
+                        }
+                    }
+                    (Method::Delete, "/api/referenz") => {
+                        let q = query(&url);
+                        let dir = daten.join("pruefstand/referenzen");
+                        let mut n = 0;
+                        if q.get("alle").is_some() {
+                            if let Ok(rd) = std::fs::read_dir(&dir) {
+                                for e in rd.flatten() {
+                                    if std::fs::remove_file(e.path()).is_ok() {
+                                        n += 1;
+                                    }
+                                }
+                            }
+                        } else if let Some(d) = q.get("datei") {
+                            // nur Dateinamen im Referenzordner, keine Pfade
+                            if !d.contains('/') && !d.contains('\\') && !d.starts_with('.') && std::fs::remove_file(dir.join(d)).is_ok() {
+                                n = 1;
+                            }
+                        }
+                        json(req, 200, format!("{{\"geloescht\":{n}}}"));
                     }
                     (Method::Get, "/api/referenzen") => {
                         let mut names: Vec<String> = std::fs::read_dir(daten.join("pruefstand/referenzen")).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()).unwrap_or_default();

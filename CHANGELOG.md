@@ -12,7 +12,7 @@
 - Browser-Version: Ansicht **Vergleich / Vektor / Konturen**, Speichern **Allgemein / Gestapelt / Schneiden** (nur Konturen für Laser, Plotter, Gravur).
 - **Schärfere Kanten bei Illustrationen**: Übergangspixel werden vor dem Nachzeichnen auf die nähere Kantenseite gesetzt (Kramer-Bruckner), keine Mischfarb-Säume mehr; Splitter werden stärker zusammengelegt. Silvester-Award: Kantenschärfe 0,92 → 1,04 (vectorizer.ai 1,12), Säume 6,9 % → 6,1 %, weiterhin weniger Fehlpixel als vectorizer.ai.
 - **Kanten-KI** (eigenes kleines Netz, 67.000 Gewichte, ohne Fremdbibliothek im Kern): erkennt echte Kanten (Umrisse, Streifen, Schrift) und unterscheidet sie von Schattierung und Glanz. Trainiert nur auf selbst erzeugten Bildern (F1 96,2 %). Bei Illustrationen wird außerhalb echter Kanten geglättet und nur an Kanten geschärft – bei 10 Pokal-Bildern weniger Fehlpixel bei jedem Bild (z. B. 5,8 % → 5,3 %). Optional **Vereinfachen** (mittel/stark): Schattierungsstufen werden zu ruhigen Flächen.
-- Prüfstand: **eigene Referenzbilder** (`referenzen/` mit Original und optional fremder SVG gleichen Namens) werden mitgemessen, inkl. Kantenschärfe; in der Browser-Version direkt unter ⚙︎ hochladbar.
+- Prüfstand: **eigene Referenzbilder** (`referenzen/` mit Original und optional fremder SVG gleichen Namens) werden mitgemessen, inkl. Kantenschärfe; in der Browser-Version direkt unter ⚙︎ hochladbar – mehrere Dateien, ganze Ordner oder ZIP, einzeln oder alle löschbar.
 - Texterkennung unter Linux: in unruhigen Bildern nur sehr sichere Zeilen (keine „Phantomtexte“ mehr in Formen).
 - Kommandozeile: `--duese`, `--ecken`, `--innen`.
 
