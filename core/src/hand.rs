@@ -90,6 +90,8 @@ pub struct HandResult {
     pub photo: f64,
     /// als Illustration behandelt (viele Farbflächen statt Logo-Aufbereitung)
     pub illu: bool,
+    /// Kantenkarte der Kanten-KI (Analysepixel, 0…1), leer ohne KI
+    pub kanten: Vec<f32>,
     /// Analysebild vor dem Übermalen von Text und Linien (für Verläufe)
     pub orig: Vec<u8>,
     /// Pixel, die zu Text oder Linien gehören und übermalt werden
@@ -1815,16 +1817,29 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
     }
     if illu {
         doc.hand.lines.clear();
+        // Kanten-KI: wo sind echte Kanten, wo nur Schattierung/Glanz?
+        let ki = if std::env::var_os("ZMN_KI_AUS").is_some() { None } else { crate::ki::kanten(&doc.data, w, hh, 768) };
         // Rauschen und JPEG-Blöcke glätten, Kanten bleiben
+        let roh = doc.data.clone();
         doc.data = vector::bilateral(&doc.data, w, hh, 3, 20.0);
+        if let Some(e) = &ki {
+            // wo sicher keine Kante ist, kräftig glätten: Schattierung wird zu ruhigen Flächen
+            let weich = vector::bilateral(&roh, w, hh, 4, 45.0);
+            for p in 0..n {
+                if e[p] < 0.15 {
+                    doc.data[p * 4..p * 4 + 3].copy_from_slice(&weich[p * 4..p * 4 + 3]);
+                }
+            }
+        }
         // Kanten schärfen: Übergangspixel (Kantenglättung, Unschärfe) auf die nähere Seite
         // der Kante setzen – sonst entstehen zwischen zwei Farben schmale Säume in Mischfarben
         let tr = (sc.round() as usize).max(1);
         // drei Durchgänge mit kleinem Radius: Kanten werden steil, feine Details bleiben
         // (größerer Radius wäre schärfer, frisst aber Glanzlinien und Sterne)
         for _ in 0..3 {
-            doc.data = toggle_sharpen(&doc.data, w, hh, tr, 24.0);
+            doc.data = toggle_sharpen(&doc.data, w, hh, tr, 24.0, ki.as_deref());
         }
+        doc.hand.kanten = ki.unwrap_or_default();
         if std::env::var_os("ZMN_DEBUG").is_some() {
             eprintln!("    Bildart: Illustration");
         }
@@ -1941,6 +1956,9 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
         }
     }
     doc.apply_map(o);
+    if doc.hand.illu && doc.hand.kanten.len() == doc.w * doc.h {
+        merge_weak(doc);
+    }
     if h.print {
         print_fix(doc, h);
         if h.print_round_mm > 0.0 {
@@ -2251,13 +2269,14 @@ fn round_corners(doc: &mut Doc, r: f32) {
 /// Kantenschärfung nach Kramer-Bruckner: in Kantenbereichen (großer Helligkeitsunterschied
 /// im Umfeld) bekommt jedes Pixel die Farbe des hellsten oder dunkelsten Nachbarn – je
 /// nachdem, welchem es näher ist. Glatte Verläufe bleiben unverändert.
-fn toggle_sharpen(d: &[u8], w: usize, h: usize, r: usize, thresh: f64) -> Vec<u8> {
+/// `kanten`: Kantenkarte der KI – nur dort schärfen, wo eine echte Kante sein kann.
+fn toggle_sharpen(d: &[u8], w: usize, h: usize, r: usize, thresh: f64, kanten: Option<&[f32]>) -> Vec<u8> {
     let mut out = d.to_vec();
     let lumv: Vec<f64> = (0..w * h).map(|p| lum(d, p)).collect();
     for y in 0..h {
         for x in 0..w {
             let p = y * w + x;
-            if d[p * 4 + 3] < 128 {
+            if d[p * 4 + 3] < 128 || kanten.is_some_and(|k| k[p] < 0.3) {
                 continue;
             }
             let (mut lo, mut hi) = (p, p);
@@ -2286,6 +2305,105 @@ fn toggle_sharpen(d: &[u8], w: usize, h: usize, r: usize, thresh: f64) -> Vec<u8
         }
     }
     out
+}
+
+
+/// Flächen zusammenlegen, deren gemeinsame Grenze laut Kanten-KI keine echte Kante ist
+/// (Schattierungsstufen, Glanzränder) – so entstehen wenige ruhige Flächen mit harten
+/// Kanten statt vieler Stufen. Ähnliche Farben vorausgesetzt; die größere Fläche gewinnt.
+fn merge_weak(doc: &mut Doc) {
+    let (w, h) = (doc.w, doc.h);
+    let n = w * h;
+    let e = &doc.hand.kanten;
+    // zusammenhängende Flächen
+    let mut comp = vec![u32::MAX; n];
+    let mut cgrp: Vec<i16> = Vec::new();
+    let mut csize: Vec<usize> = Vec::new();
+    let mut st = Vec::new();
+    for s0 in 0..n {
+        if comp[s0] != u32::MAX || doc.g[s0] < 0 {
+            continue;
+        }
+        let id = cgrp.len() as u32;
+        let g = doc.g[s0];
+        cgrp.push(g);
+        let mut cnt = 0;
+        comp[s0] = id;
+        st.push(s0);
+        while let Some(p) = st.pop() {
+            cnt += 1;
+            let (x, y) = (p % w, p / w);
+            for q in [if x > 0 { Some(p - 1) } else { None }, if x + 1 < w { Some(p + 1) } else { None }, if y > 0 { Some(p - w) } else { None }, if y + 1 < h { Some(p + w) } else { None }].into_iter().flatten() {
+                if comp[q] == u32::MAX && doc.g[q] == g {
+                    comp[q] = id;
+                    st.push(q);
+                }
+            }
+        }
+        csize.push(cnt);
+    }
+    // Grenzen: Summe der Kantenwahrscheinlichkeit je Flächenpaar
+    let mut grenz: std::collections::HashMap<(u32, u32), (f32, u32)> = std::collections::HashMap::new();
+    for y in 0..h {
+        for x in 0..w {
+            let p = y * w + x;
+            let a = comp[p];
+            if a == u32::MAX {
+                continue;
+            }
+            for q in [if x + 1 < w { Some(p + 1) } else { None }, if y + 1 < h { Some(p + w) } else { None }].into_iter().flatten() {
+                let b = comp[q];
+                if b == u32::MAX || b == a {
+                    continue;
+                }
+                let key = if a < b { (a, b) } else { (b, a) };
+                let v = grenz.entry(key).or_insert((0.0, 0));
+                v.0 += e[p].max(e[q]);
+                v.1 += 1;
+            }
+        }
+    }
+    let cols: Vec<[f64; 3]> = (0..doc.groups.len()).map(|i| doc.gcol(i).map(|v| v as f64)).collect();
+    let mut paare: Vec<(f32, u32, u32)> = grenz
+        .into_iter()
+        .filter(|(_, (s, c))| *c >= 3 && *s / (*c as f32) < 0.2)
+        .map(|((a, b), (s, c))| (s / c as f32, a, b))
+        .filter(|&(_, a, b)| cdist(cols[cgrp[a as usize] as usize], cols[cgrp[b as usize] as usize]) < 110.0)
+        .collect();
+    // schwächste Grenzen zuerst
+    paare.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut par: Vec<u32> = (0..cgrp.len() as u32).collect();
+    fn find(par: &mut [u32], mut x: u32) -> u32 {
+        while par[x as usize] != x {
+            par[x as usize] = par[par[x as usize] as usize];
+            x = par[x as usize];
+        }
+        x
+    }
+    let mut merged = 0usize;
+    for (_, a, b) in paare {
+        let (ra, rb) = (find(&mut par, a), find(&mut par, b));
+        if ra == rb {
+            continue;
+        }
+        let (big, small) = if csize[ra as usize] >= csize[rb as usize] { (ra, rb) } else { (rb, ra) };
+        par[small as usize] = big;
+        csize[big as usize] += csize[small as usize];
+        merged += 1;
+    }
+    if merged == 0 {
+        return;
+    }
+    for p in 0..n {
+        let c = comp[p];
+        if c != u32::MAX {
+            let r = find(&mut par, c);
+            doc.g[p] = cgrp[r as usize];
+        }
+    }
+    if std::env::var_os("ZMN_DEBUG").is_some() {
+        eprintln!("    Kanten-KI: {merged} schwache Grenzen aufgelöst");
+    }
 }
 
 

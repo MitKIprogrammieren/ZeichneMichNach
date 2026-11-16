@@ -2,3 +2,6 @@ target/
 app/target/
 *.dmg
 .DS_Store
+ki-daten/
+tools/zmn-ki/.venv/
+training.log
