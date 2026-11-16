@@ -124,7 +124,8 @@ a{color:var(--accent)}
 <div class="card">
 <h3>Bild</h3>
 <div class="row"><label>Bildart</label><div class="seg" id="bildart" style="width:250px"><button data-v="0" class="on">Auto</button><button data-v="1">Logo</button><button data-v="2">Illustration</button></div></div>
-<div class="hint" id="bildartHint">Logo: wenige saubere Farben, Linien und Text. Illustration: viele Farbflächen mit Schattierung, wie bei gezeichneten Figuren.</div>
+<div class="row" id="vereinfRow"><label>Vereinfachen</label><div class="seg" id="vereinfachen" style="width:250px"><button data-v="0" class="on">Aus</button><button data-v="1">Mittel</button><button data-v="2">Stark</button></div></div>
+<div class="hint" id="bildartHint">Logo: wenige saubere Farben, Linien und Text. Illustration: viele Farbflächen mit Schattierung, wie bei gezeichneten Figuren – die Kanten-KI trennt echte Kanten von Schattierung. Vereinfachen legt Schattierungsstufen zu ruhigen Flächen zusammen (flacher, plakativer Look).</div>
 <div class="row" style="margin-top:6px"><label>Farben</label>
 <div class="seg" style="width:150px"><button data-k="auto" class="on">Auto</button><button data-k="zahl">Zahl</button></div></div>
 <div class="row hidden" id="kRow"><label>Anzahl</label><div class="num"><input id="k" type="number" min="1" max="32" value="4" inputmode="numeric"></div></div>
@@ -204,7 +205,7 @@ a{color:var(--accent)}
 <script>
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 let file = null, sid = null, origUrl = null, timer = null, running = 0;
-const st = { k: 'auto', duese: 0.4, fotob: 0, bildart: 0, stil: 0, ansicht: 0 };
+const st = { k: 'auto', duese: 0.4, fotob: 0, bildart: 0, stil: 0, ansicht: 0, vereinfachen: 0 };
 let lastSvg = '';
 const store = { get(k, d) { try { return localStorage.getItem('zmn.' + k) ?? d } catch { return d } }, set(k, v) { try { localStorage.setItem('zmn.' + k, v) } catch {} } };
 
@@ -221,7 +222,7 @@ addEventListener('keydown', e => { if (e.shiftKey && (e.metaKey || e.ctrlKey) &&
 // gespeicherte Eingaben wiederherstellen
 const inputs = ['k', 'freistellen', 'innen', 'text', 'linien', 'foto', 'verlauf', 'druck', 'breite', 'farbenDruck', 'min', 'ecken', 'grund', 'hoehe', 'rand', 'grundfarbe', 'randfarbe'];
 for (const id of inputs) { const el = $('#' + id), v = store.get(id, null); if (v !== null) { if (el.type === 'checkbox') el.checked = v === '1'; else el.value = v } }
-st.k = store.get('kmode', 'auto'); st.duese = +store.get('duese', 0.4); st.fotob = +store.get('fotob', 0); st.bildart = +store.get('bildart', 0); st.stil = +store.get('stil', 0);
+st.k = store.get('kmode', 'auto'); st.duese = +store.get('duese', 0.4); st.fotob = +store.get('fotob', 0); st.bildart = +store.get('bildart', 0); st.stil = +store.get('stil', 0); st.vereinfachen = +store.get('vereinfachen', 0);
 
 function seg(sel, key, cb) {
   $$(sel + ' button').forEach(b => {
@@ -230,7 +231,7 @@ function seg(sel, key, cb) {
   });
 }
 $$('.seg button[data-k]').forEach(b => b.closest('.seg').id || (b.closest('.seg').id = 'kseg'));
-seg('#kseg', 'k', sync); seg('#duese', 'duese', () => { $('#min').value = (2 * st.duese).toFixed(2); $('#ecken').value = (st.duese / 2).toFixed(2); store.set('min', $('#min').value); store.set('ecken', $('#ecken').value); sync() }); seg('#fotob', 'fotob'); seg('#bildart', 'bildart'); seg('#stil', 'stil');
+seg('#kseg', 'k', sync); seg('#duese', 'duese', () => { $('#min').value = (2 * st.duese).toFixed(2); $('#ecken').value = (st.duese / 2).toFixed(2); store.set('min', $('#min').value); store.set('ecken', $('#ecken').value); sync() }); seg('#fotob', 'fotob'); seg('#bildart', 'bildart'); seg('#vereinfachen', 'vereinfachen'); seg('#stil', 'stil');
 $$('#ansicht button').forEach(b => b.onclick = () => { st.ansicht = +b.dataset.v; $$('#ansicht button').forEach(x => x.classList.toggle('on', x === b)); show() });
 function show() {
   const c = $('#cmp'); c.classList.toggle('v1', st.ansicht === 1); c.classList.toggle('v2', st.ansicht === 2);
@@ -255,7 +256,7 @@ function params() {
   for (const id of ['freistellen', 'innen', 'text', 'linien', 'foto', 'verlauf', 'druck']) p.set(id, $('#' + id).checked ? '1' : '0');
   p.set('duese', st.duese); p.set('breite', $('#breite').value); p.set('farben_druck', $('#farbenDruck').value);
   p.set('min', $('#min').value); p.set('ecken', $('#ecken').value); p.set('fotobereiche', st.fotob);
-  p.set('bildart', st.bildart); p.set('stil', st.stil);
+  p.set('bildart', st.bildart); p.set('stil', st.stil); p.set('vereinfachen', st.vereinfachen);
   if (file) p.set('name', file.name || 'bild');
   return p;
 }
@@ -275,7 +276,7 @@ async function run() {
     const chips = [`${j.farben.length} Farben`, `${j.formen} Formen`, `${j.knoten} Knoten`];
     if (j.linien) chips.push(`${j.linien} Linien`); if (j.verlaeufe) chips.push(`${j.verlaeufe} Verläufe`);
     if (j.freigestellt) chips.push('Hintergrund entfernt');
-    chips.unshift(j.bildart);
+    chips.unshift(j.bildart + (j.ki ? ' · Kanten-KI' : ''));
     chips.push(`${j.sekunden.toFixed(1).replace('.', ',')} s`);
     const many = j.farben.length > 12;
     $('#chips').innerHTML = (many ? `<span class="chip">${j.farben.map(c => `<span class="sw" title="${c}" style="background:${c}"></span>`).join('')}</span>` : j.farben.map(c => `<span class="chip"><span class="sw" style="background:${c}"></span>${c}</span>`).join('')) + chips.map(c => `<span class="chip">${c}</span>`).join('');

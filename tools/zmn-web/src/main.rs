@@ -99,6 +99,7 @@ fn hand_opts(q: &HashMap<String, String>) -> HandOpts {
     h.bg_inner = flag(q, "innen", false);
     h.bg_tol = num(q, "toleranz", h.bg_tol);
     h.kind = num(q, "bildart", 0.0).clamp(0.0, 2.0) as u8;
+    h.simplify = num(q, "vereinfachen", 0.0).clamp(0.0, 2.0) as u8;
     h.text = flag(q, "text", true);
     h.lines = flag(q, "linien", true);
     h.photo = flag(q, "foto", true);
@@ -179,7 +180,7 @@ fn nachzeichnen(mut req: Request, store: &Store) {
     let name = name.rsplit_once('.').map(|x| x.0.to_string()).unwrap_or(name);
     let sid = id();
     let out = format!(
-        "{{\"id\":{},\"svg\":{},\"breite\":{w},\"hoehe\":{h},\"farben\":[{}],\"formen\":{formen},\"knoten\":{knoten},\"linien\":{},\"verlaeufe\":{},\"texte\":[{}],\"hinweis\":{},\"sekunden\":{:.2},\"freigestellt\":{},\"bildart\":{}}}",
+        "{{\"id\":{},\"svg\":{},\"breite\":{w},\"hoehe\":{h},\"farben\":[{}],\"formen\":{formen},\"knoten\":{knoten},\"linien\":{},\"verlaeufe\":{},\"texte\":[{}],\"hinweis\":{},\"sekunden\":{:.2},\"freigestellt\":{},\"bildart\":{},\"ki\":{}}}",
         quote(&sid),
         quote(&svg),
         farben.join(","),
@@ -189,7 +190,8 @@ fn nachzeichnen(mut req: Request, store: &Store) {
         info.note.as_deref().map(quote).unwrap_or_else(|| "null".into()),
         info.secs,
         doc.data.chunks(4).any(|p| p[3] == 0),
-        quote(if doc.hand.illu { "Illustration" } else if doc.hand.flat { "flache Grafik" } else { "Logo/Grafik" })
+        quote(if doc.hand.illu { "Illustration" } else if doc.hand.flat { "flache Grafik" } else { "Logo/Grafik" }),
+        !doc.hand.kanten.is_empty()
     );
     {
         let mut s = store.lock().unwrap();

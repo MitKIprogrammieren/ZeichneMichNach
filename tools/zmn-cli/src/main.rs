@@ -83,6 +83,12 @@ fn main() {
                 h.print_round_mm = args[i].replace(',', ".").parse().unwrap_or(0.2);
             }
             "--innen" => h.bg_inner = true,
+            "--illustration" => h.kind = 2,
+            "--logo" => h.kind = 1,
+            "--vereinfachen" => {
+                i += 1;
+                h.simplify = args[i].parse().unwrap_or(1);
+            }
             "--min" => {
                 i += 1;
                 h.print_min_mm = args[i].replace(',', ".").parse().unwrap_or(0.8);

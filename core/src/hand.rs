@@ -19,6 +19,8 @@ pub struct HandOpts {
     pub bg_inner: bool,
     /// Bildart: 0 = automatisch, 1 = Logo/Grafik, 2 = Illustration (viele Farben, Schattierung)
     pub kind: u8,
+    /// Illustration mit Kanten-KI: Schattierungsstufen zusammenlegen (0 = aus, 1 = mittel, 2 = stark)
+    pub simplify: u8,
     pub lines: bool,
     pub photo: bool,
     pub gradients: bool,
@@ -46,6 +48,7 @@ impl Default for HandOpts {
             bg_tol: 28.0,
             bg_inner: false,
             kind: 0,
+            simplify: 0,
             lines: true,
             photo: true,
             gradients: true,
@@ -92,6 +95,8 @@ pub struct HandResult {
     pub illu: bool,
     /// Kantenkarte der Kanten-KI (Analysepixel, 0…1), leer ohne KI
     pub kanten: Vec<f32>,
+    /// gewählte Vereinfachung (für Neuberechnungen)
+    pub simplify: u8,
     /// Analysebild vor dem Übermalen von Text und Linien (für Verläufe)
     pub orig: Vec<u8>,
     /// Pixel, die zu Text oder Linien gehören und übermalt werden
@@ -1956,7 +1961,8 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
         }
     }
     doc.apply_map(o);
-    if doc.hand.illu && doc.hand.kanten.len() == doc.w * doc.h {
+    doc.hand.simplify = h.simplify;
+    if doc.hand.illu && h.simplify > 0 && doc.hand.kanten.len() == doc.w * doc.h {
         merge_weak(doc);
     }
     if h.print {
@@ -2364,11 +2370,16 @@ fn merge_weak(doc: &mut Doc) {
         }
     }
     let cols: Vec<[f64; 3]> = (0..doc.groups.len()).map(|i| doc.gcol(i).map(|v| v as f64)).collect();
+    // Grenze gilt als „keine echte Kante“ unter kt, Farben dürfen höchstens kd auseinander liegen
+    let (kt, kd): (f32, f64) = match doc.hand.simplify {
+        2 => (0.12, 60.0),
+        _ => (0.08, 45.0),
+    };
     let mut paare: Vec<(f32, u32, u32)> = grenz
         .into_iter()
-        .filter(|(_, (s, c))| *c >= 3 && *s / (*c as f32) < 0.2)
+        .filter(|(_, (s, c))| *c >= 3 && *s / (*c as f32) < kt)
         .map(|((a, b), (s, c))| (s / c as f32, a, b))
-        .filter(|&(_, a, b)| cdist(cols[cgrp[a as usize] as usize], cols[cgrp[b as usize] as usize]) < 110.0)
+        .filter(|&(_, a, b)| cdist(cols[cgrp[a as usize] as usize], cols[cgrp[b as usize] as usize]) < kd)
         .collect();
     // schwächste Grenzen zuerst
     paare.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap_or(std::cmp::Ordering::Equal));
