@@ -4,6 +4,7 @@ FROM rust:1-bookworm AS bau
 WORKDIR /src
 COPY core core
 COPY app/src app/src
+COPY app/assets app/assets
 COPY packaging/icon.png packaging/icon.png
 COPY tools/zmn-web tools/zmn-web
 COPY tools/zmn-pruefstand tools/zmn-pruefstand
