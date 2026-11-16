@@ -1817,6 +1817,14 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
         doc.hand.lines.clear();
         // Rauschen und JPEG-Blöcke glätten, Kanten bleiben
         doc.data = vector::bilateral(&doc.data, w, hh, 3, 20.0);
+        // Kanten schärfen: Übergangspixel (Kantenglättung, Unschärfe) auf die nähere Seite
+        // der Kante setzen – sonst entstehen zwischen zwei Farben schmale Säume in Mischfarben
+        let tr = (sc.round() as usize).max(1);
+        // drei Durchgänge mit kleinem Radius: Kanten werden steil, feine Details bleiben
+        // (größerer Radius wäre schärfer, frisst aber Glanzlinien und Sterne)
+        for _ in 0..3 {
+            doc.data = toggle_sharpen(&doc.data, w, hh, tr, 24.0);
+        }
         if std::env::var_os("ZMN_DEBUG").is_some() {
             eprintln!("    Bildart: Illustration");
         }
@@ -1887,10 +1895,10 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
 
 /// Zuordnung, ggf. Druckaufbereitung, Pfade, dann Text und Verläufe.
 fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
-    // Illustration: kleine Splitter in die Nachbarfläche legen (wie „Flächen beruhigen“ 1)
     let oi;
-    let o = if doc.hand.illu && o.calm < 1.0 {
-        oi = Opts { calm: 1.0, ..o.clone() };
+    // Illustration: Splitter in die Nachbarfläche legen („Flächen beruhigen“ 2)
+    let o = if doc.hand.illu && o.calm < 2.0 {
+        oi = Opts { calm: 2.0, ..o.clone() };
         &oi
     } else {
         o
@@ -2237,6 +2245,47 @@ fn round_corners(doc: &mut Doc, r: f32) {
         eprintln!("    Ecken abrunden (r {:.1} px): {:?} → {:?}", r, c(&doc.g), c(&out));
     }
     doc.g = out;
+}
+
+
+/// Kantenschärfung nach Kramer-Bruckner: in Kantenbereichen (großer Helligkeitsunterschied
+/// im Umfeld) bekommt jedes Pixel die Farbe des hellsten oder dunkelsten Nachbarn – je
+/// nachdem, welchem es näher ist. Glatte Verläufe bleiben unverändert.
+fn toggle_sharpen(d: &[u8], w: usize, h: usize, r: usize, thresh: f64) -> Vec<u8> {
+    let mut out = d.to_vec();
+    let lumv: Vec<f64> = (0..w * h).map(|p| lum(d, p)).collect();
+    for y in 0..h {
+        for x in 0..w {
+            let p = y * w + x;
+            if d[p * 4 + 3] < 128 {
+                continue;
+            }
+            let (mut lo, mut hi) = (p, p);
+            for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+                for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                    let q = yy * w + xx;
+                    if d[q * 4 + 3] < 128 {
+                        continue;
+                    }
+                    if lumv[q] < lumv[lo] {
+                        lo = q;
+                    }
+                    if lumv[q] > lumv[hi] {
+                        hi = q;
+                    }
+                }
+            }
+            if lumv[hi] - lumv[lo] < thresh {
+                continue;
+            }
+            // nach Farbabstand entscheiden (nicht nur Helligkeit): rot/schwarz/gold sauber trennen
+            let c = px(d, p);
+            let (a, b) = (px(d, lo), px(d, hi));
+            let q = if cdist(c, a) <= cdist(c, b) { lo } else { hi };
+            out[p * 4..p * 4 + 3].copy_from_slice(&d[q * 4..q * 4 + 3]);
+        }
+    }
+    out
 }
 
 

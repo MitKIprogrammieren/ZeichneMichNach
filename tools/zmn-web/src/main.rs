@@ -351,10 +351,39 @@ fn main() {
                         let anzahl = num(&query(&url), "anzahl", 2.0).clamp(1.0, 10.0) as u32;
                         let (pr, dir) = (pruef.clone(), daten.join("pruefstand"));
                         std::thread::spawn(move || {
-                            let _ = std::process::Command::new(bin).arg(&dir).arg("--anzahl").arg(anzahl.to_string()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
+                            let _ = std::process::Command::new(bin).arg(&dir).arg("--anzahl").arg(anzahl.to_string()).arg("--referenzen").arg(dir.join("referenzen")).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status();
                             pr.lock().unwrap().running = false;
                         });
                         json(req, 200, "{\"laeuft\":true}".into());
+                    }
+                    (Method::Post, "/api/referenz") => {
+                        // eigenes Referenzbild (Original) oder fremde SVG dazu in den Prüfstand legen
+                        let mut req = req;
+                        let q = query(&url);
+                        let name: String = q.get("name").cloned().unwrap_or_default().chars().filter(|c| c.is_alphanumeric() || "-_ ".contains(*c)).collect::<String>().trim().replace(' ', "_");
+                        let ext = match q.get("art").map(|s| s.as_str()) {
+                            Some("svg") => "svg",
+                            Some("jpg") | Some("jpeg") => "jpg",
+                            Some("webp") => "webp",
+                            _ => "png",
+                        };
+                        let mut body = Vec::new();
+                        let _ = req.as_reader().take(MAX_UPLOAD as u64).read_to_end(&mut body);
+                        if name.is_empty() || body.is_empty() {
+                            fehler(req, 400, "Name oder Datei fehlt");
+                            continue;
+                        }
+                        let dir = daten.join("pruefstand/referenzen");
+                        let _ = std::fs::create_dir_all(&dir);
+                        match std::fs::write(dir.join(format!("{name}.{ext}")), &body) {
+                            Ok(_) => json(req, 200, format!("{{\"ok\":true,\"datei\":{}}}", quote(&format!("{name}.{ext}")))),
+                            Err(e) => fehler(req, 500, &e.to_string()),
+                        }
+                    }
+                    (Method::Get, "/api/referenzen") => {
+                        let mut names: Vec<String> = std::fs::read_dir(daten.join("pruefstand/referenzen")).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect()).unwrap_or_default();
+                        names.sort();
+                        json(req, 200, format!("[{}]", names.iter().map(|n| quote(n)).collect::<Vec<_>>().join(",")));
                     }
                     (Method::Get, "/pruefstand") => match std::fs::read(daten.join("pruefstand/bericht.html")) {
                         Ok(d) => {

@@ -190,6 +190,14 @@ a{color:var(--accent)}
 <div class="row"><label>Bilder je Art</label><div class="num"><input id="pAnz" type="number" value="2" min="1" max="10"></div></div>
 <div style="display:flex;gap:8px;margin-top:6px"><button class="btn pri" id="pStart" style="flex:1">Prüfstand starten</button><a class="btn hidden" id="pLink" href="/pruefstand" target="_blank" style="flex:1;text-align:center;text-decoration:none">Bericht öffnen</a></div>
 <div class="hint" id="pStat"></div>
+<details style="margin-top:8px"><summary>Eigenes Referenzbild hinzufügen</summary>
+<div class="hint">Dein Original (PNG/JPG) und – falls vorhanden – die SVG eines anderen Programms (z. B. vectorizer.ai). Beide werden beim nächsten Prüfstand mitgemessen und verglichen.</div>
+<div class="row"><label>Name</label><div class="num" style="width:180px"><input id="rName" type="text" placeholder="silvester" style="text-align:left"></div></div>
+<div class="row"><label>Original</label><input id="rBild" type="file" accept="image/*" style="max-width:200px"></div>
+<div class="row"><label>Fremde SVG</label><input id="rSvg" type="file" accept=".svg,image/svg+xml" style="max-width:200px"></div>
+<button class="btn" id="rLaden" style="width:100%;margin-top:4px">Hochladen</button>
+<div class="hint" id="rStat"></div>
+</details>
 <pre class="hidden" id="pZus"></pre>
 <div class="hint" id="ver"></div>
 </div></div>
@@ -308,7 +316,7 @@ $$('.dl .btn').forEach(b => b.onclick = () => {
 });
 
 // Einstellungen und Prüfstand
-$('#einst').onclick = () => { $('#modal').classList.add('on'); status() };
+$('#einst').onclick = () => { $('#modal').classList.add('on'); status(); refs() };
 $('#zu').onclick = () => $('#modal').classList.remove('on');
 $('#modal').onclick = e => { if (e.target.id === 'modal') $('#modal').classList.remove('on') };
 let pt = null;
@@ -324,6 +332,16 @@ async function status() {
     clearTimeout(pt); if (j.pruefstand_laeuft && $('#modal').classList.contains('on')) pt = setTimeout(status, 2000);
   } catch {}
 }
+async function refs() { try { const l = await (await fetch('/api/referenzen')).json(); $('#rStat').textContent = l.length ? 'Vorhanden: ' + l.join(', ') : 'Noch keine eigenen Referenzbilder.' } catch {} }
+$('#rLaden').onclick = async () => {
+  const name = $('#rName').value.trim(), b = $('#rBild').files[0], v = $('#rSvg').files[0];
+  if (!name || !b) { $('#rStat').textContent = 'Name und Original sind nötig.'; return }
+  const ext = (b.name.split('.').pop() || 'png').toLowerCase();
+  $('#rStat').textContent = 'Lade hoch …';
+  await fetch(`/api/referenz?name=${encodeURIComponent(name)}&art=${ext}`, { method: 'POST', body: b });
+  if (v) await fetch(`/api/referenz?name=${encodeURIComponent(name)}&art=svg`, { method: 'POST', body: v });
+  refs();
+};
 $('#pStart').onclick = async () => { await fetch('/api/pruefstand?anzahl=' + $('#pAnz').value, { method: 'POST' }); status() };
 </script>
 </body>

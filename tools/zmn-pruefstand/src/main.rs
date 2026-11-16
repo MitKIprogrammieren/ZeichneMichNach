@@ -366,7 +366,36 @@ fn referenzen(dir: &Path, out: &Path, db: &Arc<resvg::usvg::fontdb::Database>) -
             }
             c.map(|v| (v / nn) as f32)
         };
-        let measure = |svg: &str| -> (f64, f64, usize) {
+        // Kantenschärfe: Steilheit der Kanten dort, wo das Original Kanten hat (1 = wie Original)
+        let lumg = |p: &[[f32; 3]]| -> Vec<f32> {
+            let l: Vec<f32> = p.iter().map(|c| 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]).collect();
+            let mut g = vec![0f32; w * h];
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let i = y * w + x;
+                    let gx = l[i + 1 - w] + 2.0 * l[i + 1] + l[i + 1 + w] - l[i - 1 - w] - 2.0 * l[i - 1] - l[i - 1 + w];
+                    let gy = l[i + w - 1] + 2.0 * l[i + w] + l[i + w + 1] - l[i - w - 1] - 2.0 * l[i - w] - l[i - w + 1];
+                    g[i] = (gx * gx + gy * gy).sqrt();
+                }
+            }
+            // Spitzenwert im 3×3-Umfeld
+            let mut m = g.clone();
+            for y in 1..h - 1 {
+                for x in 1..w - 1 {
+                    let i = y * w + x;
+                    m[i] = [g[i - w - 1], g[i - w], g[i - w + 1], g[i - 1], g[i], g[i + 1], g[i + w - 1], g[i + w], g[i + w + 1]].iter().cloned().fold(0.0, f32::max);
+                }
+            }
+            m
+        };
+        let go = lumg(&truth);
+        let thr = {
+            let mut v: Vec<f32> = go.iter().cloned().filter(|&x| x > 0.0).collect();
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v.get(v.len() * 85 / 100).copied().unwrap_or(1.0)
+        };
+        let base: f64 = go.iter().filter(|&&x| x > thr).map(|&x| x as f64).sum();
+        let measure = |svg: &str| -> (f64, f64, usize, f64) {
             let r = render(svg, w as u32, h as u32, db).unwrap_or_else(|_| vec![0; w * h * 4]);
             let p: Vec<[f32; 3]> = r.chunks(4).map(|q| {
                 let a = q[3] as f32 / 255.0;
@@ -380,19 +409,21 @@ fn referenzen(dir: &Path, out: &Path, db: &Arc<resvg::usvg::fontdb::Database>) -
                     bad += 1;
                 }
             }
-            (100.0 * sum / (w * h) as f64, 100.0 * bad as f64 / (w * h) as f64, knoten(svg))
+            let gr = lumg(&p);
+            let sharp: f64 = (0..w * h).filter(|&i| go[i] > thr).map(|i| gr[i] as f64).sum::<f64>() / base.max(1.0);
+            (100.0 * sum / (w * h) as f64, 100.0 * bad as f64 / (w * h) as f64, knoten(svg), sharp)
         };
         let t = Instant::now();
         // Hintergrund bleibt – das Original hat ihn auch
         let r = run_hand(&rgba, w, h, &f, HandOpts { bg_cut: false, ..HandOpts::default() });
         let secs = t.elapsed().as_secs_f64();
         let _ = std::fs::write(out.join(format!("{stem}-zmn.svg")), &r.svg);
-        let (fa, fe, kn) = measure(&r.svg);
-        let _ = writeln!(rep, "{stem:20} ZeichneMichNach  farbe {fa:5.2}  fehl {fe:5.2}  knoten {kn:7}  zeit {secs:5.1}");
+        let (fa, fe, kn, sh) = measure(&r.svg);
+        let _ = writeln!(rep, "{stem:20} ZeichneMichNach  farbe {fa:5.2}  fehl {fe:5.2}  schärfe {sh:4.2}  knoten {kn:7}  zeit {secs:5.1}");
         let refp = f.with_extension("svg");
         if let Ok(rs) = std::fs::read_to_string(&refp) {
-            let (fa, fe, kn) = measure(&rs);
-            let _ = writeln!(rep, "{stem:20} Referenz-SVG     farbe {fa:5.2}  fehl {fe:5.2}  knoten {kn:7}");
+            let (fa, fe, kn, sh) = measure(&rs);
+            let _ = writeln!(rep, "{stem:20} Referenz-SVG     farbe {fa:5.2}  fehl {fe:5.2}  schärfe {sh:4.2}  knoten {kn:7}");
         }
     }
     rep

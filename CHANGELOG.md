@@ -10,7 +10,8 @@
 - **Spitze Ecken abrunden** im Druckmodus (Radius einstellbar, Standard halbe Düse); Düse setzt schmalste Stelle und Eckenradius; Höhen und Rand werden an die Düse angepasst.
 - **Bildart Illustration** (automatisch erkannt oder wählbar): gezeichnete Figuren mit Schattierung und Glanz werden zu vielen sauberen Farbflächen (wie vectorizer.ai) statt zu Logo-Flächen mit Linien. Beim Silvester-Award: Fehlpixel 20 % → 5,3 % (vectorizer.ai 7,2 %).
 - Browser-Version: Ansicht **Vergleich / Vektor / Konturen**, Speichern **Allgemein / Gestapelt / Schneiden** (nur Konturen für Laser, Plotter, Gravur).
-- Prüfstand: **eigene Referenzbilder** (`referenzen/` mit Original und optional fremder SVG gleichen Namens) werden mitgemessen.
+- **Schärfere Kanten bei Illustrationen**: Übergangspixel werden vor dem Nachzeichnen auf die nähere Kantenseite gesetzt (Kramer-Bruckner), keine Mischfarb-Säume mehr; Splitter werden stärker zusammengelegt. Silvester-Award: Kantenschärfe 0,92 → 1,04 (vectorizer.ai 1,12), Säume 6,9 % → 6,1 %, weiterhin weniger Fehlpixel als vectorizer.ai.
+- Prüfstand: **eigene Referenzbilder** (`referenzen/` mit Original und optional fremder SVG gleichen Namens) werden mitgemessen, inkl. Kantenschärfe; in der Browser-Version direkt unter ⚙︎ hochladbar.
 - Texterkennung unter Linux: in unruhigen Bildern nur sehr sichere Zeilen (keine „Phantomtexte“ mehr in Formen).
 - Kommandozeile: `--duese`, `--ecken`, `--innen`.
 
