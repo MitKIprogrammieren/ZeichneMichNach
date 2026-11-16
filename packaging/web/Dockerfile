@@ -14,7 +14,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng \
       fonts-dejavu-core fonts-liberation2 fonts-freefont-ttf fonts-lato fonts-open-sans \
-      fonts-roboto-unhinted fonts-montserrat fonts-cantarell ca-certificates \
+      fonts-roboto-unhinted fonts-cantarell ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=bau /src/tools/zmn-web/target/release/zmn-web /app/zmn-web
 COPY --from=bau /src/tools/zmn-pruefstand/target/release/zmn-pruefstand /app/zmn-pruefstand
