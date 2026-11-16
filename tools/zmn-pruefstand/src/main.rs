@@ -340,9 +340,10 @@ fn schmal(svg: &str, db: &Arc<resvg::usvg::fontdb::Database>, min_mm: f64) -> f6
 
 /// Eigene Referenzbilder: Original (PNG/JPG) + optional fremde SVG gleichen Namens
 /// (z. B. von vectorizer.ai). Beide werden gegen das Original gemessen.
-fn referenzen(dir: &Path, out: &Path, db: &Arc<resvg::usvg::fontdb::Database>) -> String {
+fn referenzen(dir: &Path, out: &Path, db: &Arc<resvg::usvg::fontdb::Database>) -> (String, String) {
     let mut rep = String::new();
-    let Ok(rd) = std::fs::read_dir(dir) else { return rep };
+    let mut bilder = String::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return (rep, bilder) };
     let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| matches!(p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg" | "webp"))).collect();
     files.sort();
     for f in files {
@@ -420,13 +421,42 @@ fn referenzen(dir: &Path, out: &Path, db: &Arc<resvg::usvg::fontdb::Database>) -
         let _ = std::fs::write(out.join(format!("{stem}-zmn.svg")), &r.svg);
         let (fa, fe, kn, sh) = measure(&r.svg);
         let _ = writeln!(rep, "{stem:20} ZeichneMichNach  farbe {fa:5.2}  fehl {fe:5.2}  schärfe {sh:4.2}  knoten {kn:7}  zeit {secs:5.1}");
+        // Bilder für den Bericht: ganzes Bild klein und ein Ausschnitt 1:1 aus der Mitte
+        {
+            let tw = 360u32;
+            let th = ((h as f64 * tw as f64 / w as f64).round() as u32).max(1);
+            let small = |d: &[u8]| -> Vec<u8> {
+                let im = image::RgbaImage::from_raw(w as u32, h as u32, d.to_vec()).unwrap();
+                image::imageops::resize(&im, tw, th, image::imageops::FilterType::Triangle).into_raw()
+            };
+            let full = render(&r.svg, w as u32, h as u32, db).unwrap_or_else(|_| vec![0; w * h * 4]);
+            let crop = |d: &[u8]| -> (Vec<u8>, usize) {
+                let c = 300.min(w).min(h);
+                let (ox, oy) = ((w - c) / 2, (h - c) / 2);
+                let mut o = Vec::with_capacity(c * c * 4);
+                for y in oy..oy + c {
+                    o.extend_from_slice(&d[(y * w + ox) * 4..(y * w + ox + c) * 4]);
+                }
+                (o, c)
+            };
+            let (co, c) = crop(&rgba);
+            let (cz, _) = crop(&full);
+            let _ = write!(
+                bilder,
+                "<div class=row><div class=c><img style=\"width:{tw}px;height:auto\" src=\"data:image/png;base64,{}\"><br>{stem} · Original</div><div class=c><img style=\"width:{tw}px;height:auto\" src=\"data:image/png;base64,{}\"><br>ZeichneMichNach · {fe:.1} % Fehlpixel · Schärfe {sh:.2}</div><div class=c><img style=\"width:{c}px;height:{c}px\" src=\"data:image/png;base64,{}\"><br>Ausschnitt Original</div><div class=c><img style=\"width:{c}px;height:{c}px\" src=\"data:image/png;base64,{}\"><br>Ausschnitt ZeichneMichNach</div></div>",
+                png_b64(&small(&rgba), tw as usize, th as usize),
+                png_b64(&small(&full), tw as usize, th as usize),
+                png_b64(&co, c, c),
+                png_b64(&cz, c, c)
+            );
+        }
         let refp = f.with_extension("svg");
         if let Ok(rs) = std::fs::read_to_string(&refp) {
             let (fa, fe, kn, sh) = measure(&rs);
             let _ = writeln!(rep, "{stem:20} Referenz-SVG     farbe {fa:5.2}  fehl {fe:5.2}  schärfe {sh:4.2}  knoten {kn:7}");
         }
     }
-    rep
+    (rep, bilder)
 }
 
 fn png_b64(d: &[u8], w: usize, h: usize) -> String {
@@ -556,11 +586,11 @@ fn main() {
     html += &rows;
     std::fs::write(dir.join("werte.csv"), csv).unwrap();
     if let Some(rd) = refdir.or_else(|| Some(dir.join("referenzen")).filter(|p| p.is_dir())) {
-        let rep = referenzen(&rd, &dir.join("ergebnisse"), &db);
+        let (rep, bilder) = referenzen(&rd, &dir.join("ergebnisse"), &db);
         if !rep.is_empty() {
             summary += "\nEigene Referenzbilder:\n";
             summary += &rep;
-            html = html.replacen("<h2>Einzelbilder</h2>", &format!("<h2>Eigene Referenzbilder</h2><pre>{}</pre><h2>Einzelbilder</h2>", rep), 1);
+            html = html.replacen("<h2>Einzelbilder</h2>", &format!("<h2>Eigene Referenzbilder</h2><pre>{}</pre>{}<h2>Einzelbilder</h2>", rep, bilder), 1);
         }
     }
     std::fs::write(dir.join("bericht.html"), html).unwrap();
