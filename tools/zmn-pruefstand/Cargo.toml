@@ -1,0 +1,22 @@
+[package]
+name = "zmn-pruefstand"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Prüfstand: Testbilder mit bekanntem Original erzeugen, nachzeichnen und die Abweichung messen"
+
+[workspace]
+
+[[bin]]
+name = "zmn-pruefstand"
+path = "src/main.rs"
+
+[dependencies]
+nz-core = { path = "../../core" }
+ttf-parser = "0.25"
+resvg = "0.45"
+vtracer = "0.6.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = 3

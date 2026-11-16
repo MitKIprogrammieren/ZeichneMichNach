@@ -1,0 +1,22 @@
+#!/bin/sh
+# Texterkennung für die Linux-/Container-Version (statt Apple Vision): Tesseract.
+# Ausgabe wie der Mac-Helfer: [{"text","conf","x","y","w","h"}] in Pixeln, eine Zeile je Textzeile.
+set -e
+[ -n "$1" ] || { echo "Aufruf: zmn-ocr bild.png" >&2; exit 2; }
+tesseract "$1" stdout -l "${ZMN_OCR_LANG:-deu+eng}" --psm 11 tsv 2>/dev/null | awk -F'\t' '
+NR > 1 && $1 == 5 && $11 >= 0 {
+  t = $12; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == "") next
+  k = $3 "_" $4 "_" $5
+  if (!(k in x0)) { order[++n] = k; x0[k] = $7; y0[k] = $8; x1[k] = $7 + $9; y1[k] = $8 + $10; txt[k] = t; cs[k] = $11; cn[k] = 1; next }
+  if ($7 < x0[k]) x0[k] = $7; if ($8 < y0[k]) y0[k] = $8
+  if ($7 + $9 > x1[k]) x1[k] = $7 + $9; if ($8 + $10 > y1[k]) y1[k] = $8 + $10
+  txt[k] = txt[k] " " t; cs[k] += $11; cn[k]++
+}
+END {
+  printf "["
+  for (i = 1; i <= n; i++) {
+    k = order[i]; s = txt[k]; gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
+    printf "%s{\"text\":\"%s\",\"conf\":%.3f,\"x\":%d,\"y\":%d,\"w\":%d,\"h\":%d}", (i > 1 ? "," : ""), s, cs[k] / cn[k] / 100, x0[k], y0[k], x1[k] - x0[k], y1[k] - y0[k]
+  }
+  print "]"
+}'

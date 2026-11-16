@@ -22,6 +22,73 @@ pub fn available() -> bool {
     std::env::var_os("ZMN_OCR_JSON").is_some() || helper().is_some()
 }
 
+/// Textzeilen im Bild finden. Unter Linux (Tesseract) wird das Bild zusätzlich je Farbe
+/// in eine Schwarz-Weiß-Maske zerlegt – Tesseract liest farbige Schrift auf farbigem
+/// Grund schlecht, eine saubere Maske dagegen sehr gut.
+pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<Vec<TextLine>, String> {
+    if !cfg!(target_os = "linux") || std::env::var_os("ZMN_OCR_JSON").is_some() {
+        return recognize(image, w, h);
+    }
+    let mut all = recognize(image, w, h).unwrap_or_default();
+    let q = nz_core::vector::quantize(rgba, w, h);
+    if !q.pal.is_empty() {
+        // ein paar Farben mehr als automatisch – Schrift mit wenig Kontrast soll nicht
+        // mit ihrem Untergrund verschmelzen
+        let k = (q.auto + 2).clamp(3, 8).min(q.pal.len());
+        let groups = &q.presets[k];
+        for (gi, g) in groups.iter().enumerate() {
+            let mut img = vec![255u8; w * h * 4];
+            let mut cnt = 0usize;
+            for p in 0..w * h {
+                let l = q.labels[p];
+                if l >= 0 && g.contains(&(l as usize)) && rgba[p * 4 + 3] >= 128 {
+                    img[p * 4] = 0;
+                    img[p * 4 + 1] = 0;
+                    img[p * 4 + 2] = 0;
+                    cnt += 1;
+                }
+            }
+            // sehr große Flächen (Hintergrund) und Krümel überspringen
+            if cnt < 50 || cnt > w * h * 6 / 10 {
+                continue;
+            }
+            let tmp = std::env::temp_dir().join(format!("zmn-ocr-{}-{gi}.png", std::process::id()));
+            if std::fs::write(&tmp, nz_core::vector::encode_png(w, h, &img)).is_err() {
+                continue;
+            }
+            if let Ok(lines) = recognize(&tmp, w, h) {
+                all.extend(lines);
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    // Tesseract liest in Formen gern einzelne Zeichen hinein („m @“ in einem Stern):
+    // nur Zeilen mit mindestens zwei Buchstaben/Ziffern und überwiegend Schrift behalten
+    all.retain(|l| {
+        let t: Vec<char> = l.text.chars().filter(|c| !c.is_whitespace()).collect();
+        let an = t.iter().filter(|c| c.is_alphanumeric()).count();
+        an >= 2 && an * 10 >= t.len() * 7
+    });
+    // doppelte Funde (gleiche Stelle) zusammenlegen – der längere Text gewinnt
+    let mut out: Vec<TextLine> = Vec::new();
+    for l in all {
+        let over = |a: &[f64; 4], b: &[f64; 4]| {
+            let ix = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+            let iy = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+            let ar = ((a[2] - a[0]) * (a[3] - a[1])).min((b[2] - b[0]) * (b[3] - b[1])).max(1.0);
+            ix * iy / ar > 0.5
+        };
+        if let Some(o) = out.iter_mut().find(|o| over(&o.bbox, &l.bbox)) {
+            if l.text.chars().filter(|c| c.is_alphanumeric()).count() > o.text.chars().filter(|c| c.is_alphanumeric()).count() {
+                *o = l;
+            }
+        } else {
+            out.push(l);
+        }
+    }
+    Ok(out)
+}
+
 /// Textzeilen im Bild finden (Rechtecke in Pixeln des Quellbilds).
 pub fn recognize(image: &Path, w: usize, h: usize) -> Result<Vec<TextLine>, String> {
     let json = if let Some(f) = std::env::var_os("ZMN_OCR_JSON") {

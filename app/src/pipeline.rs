@@ -25,7 +25,7 @@ pub fn run(doc: &mut Doc, path: Option<&Path>, o: &Opts, h: &HandOpts, k: usize,
                 // dem Helfer immer ein PNG geben – unabhängig von Dateiendung und Format
                 let tmp = std::env::temp_dir().join(format!("zmn-ocr-{}.png", std::process::id()));
                 let use_path = if std::fs::write(&tmp, nz_core::vector::encode_png(doc.src_w, doc.src_h, &doc.src)).is_ok() { tmp.clone() } else { p.to_path_buf() };
-                let res = ocr::recognize(&use_path, doc.src_w, doc.src_h);
+                let res = ocr::recognize_rgba(&use_path, doc.src_w, doc.src_h, &doc.src);
                 let _ = std::fs::remove_file(&tmp);
                 match res {
                     Ok(l) if l.is_empty() => info.note = Some("Texterkennung: kein Text im Bild gefunden".into()),
@@ -52,7 +52,7 @@ pub fn run(doc: &mut Doc, path: Option<&Path>, o: &Opts, h: &HandOpts, k: usize,
             let (outs, matches) = fonts::match_lines(&ana, &|f| progress("Passende Schrift suchen …", 0.25 + 0.45 * f));
             if matches.is_empty() {
                 info.note = Some(format!(
-                    "Text erkannt ({}), aber keine Schrift auf diesem Mac passt gut genug – Text wird als Fläche nachgezeichnet.",
+                    "Text erkannt ({}), aber keine installierte Schrift passt gut genug – Text wird als Fläche nachgezeichnet.",
                     lines.iter().map(|l| format!("„{}“", l.text)).collect::<Vec<_>>().join(", ")
                 ));
             } else if matches.len() < lines.len() {

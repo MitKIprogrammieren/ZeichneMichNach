@@ -1,0 +1,24 @@
+[package]
+name = "zmn-web"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "ZeichneMichNach im Browser (für den Container)"
+
+[workspace]
+
+[[bin]]
+name = "zmn-web"
+path = "src/main.rs"
+
+[dependencies]
+nz-core = { path = "../../core" }
+ttf-parser = "0.25"
+tiny_http = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true

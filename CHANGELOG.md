@@ -3,6 +3,15 @@
 ## 1.0.0 – noch nicht veröffentlicht
 
 ### Neu
+- **Browser-Version im Container** (`zmn-web`): gleiche Engine, Bedienung im Browser vom Mac oder iPhone, Original/SVG-Vergleich mit Schieberegler, Speichern als SVG, PNG, PDF, DXF, EPS, STEP und 3MF. Texterkennung mit Tesseract (Farbmasken je Farbe, damit farbige Schrift auf farbigem Grund gelesen wird). Image `ghcr.io/mitkiprogrammieren/zeichnemichnach-web`, baut automatisch.
+- **Prüfstand** (`zmn-pruefstand`): Testbilder mit bekanntem Original, Messung von Farbfehler, Fehlpixeln, Kanten, Knoten, Zeit und zu schmalen Stellen; VTracer als Vergleich. Ergebnis: eigener Kern ist durchweg genauer als VTracer.
+- **Dünne Linien entmischen**: Linien und Ränder aus Mischpixeln bekommen ihre echte Farbe (statt blass) und die richtige Breite (Deckung bleibt erhalten). Fehlpixel bei Linien 2,6 % → 2,0 %, bei kleinen Bildern 1,5 % → 1,0 %.
+- **Hintergrund entfernen** auch bei Verlauf/Vignette (glattes Farbmodell aus dem Rand), optional mit Innenflächen.
+- **Spitze Ecken abrunden** im Druckmodus (Radius einstellbar, Standard halbe Düse); Düse setzt schmalste Stelle und Eckenradius; Höhen und Rand werden an die Düse angepasst.
+- Kommandozeile: `--duese`, `--ecken`, `--innen`.
+
+### Behoben
+- Druckmodus: verbreiterte Striche wurden im zweiten Durchgang wieder zu schmal (jetzt sicher ≥ schmalste Stelle).
 - Eigene App **ZeichneMichNach** im Mesh2STEP-Look, dunkles Design als Standard, hell/dunkel/System in den Einstellungen.
 - **Nachzeichnen wie von Hand**: Hintergrund außen freistellen, Text erkennen und durch passende Schrift ersetzen (Apple-Texterkennung, alle Schriften des Macs, Schnitt je Buchstabe), feine Linien als Striche (über Kreuzungen verbunden, Kreise ergänzt), Fotobereiche beruhigen, Farbverläufe.
 - Tafel „Erkannter Text“ mit gewählter Schrift und Übereinstimmung.

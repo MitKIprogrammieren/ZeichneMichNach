@@ -1,5 +1,5 @@
 //! zmn – ZeichneMichNach auf der Kommandozeile.
-//! zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund]
+//! zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--innen] [--druck mm] [--duese 0.4] [--ecken mm]
 #[path = "../../../app/src/fonts.rs"]
 mod fonts;
 #[path = "../../../app/src/ocr.rs"]
@@ -72,6 +72,17 @@ fn main() {
                 i += 1;
                 h.print_colors = args[i].parse().unwrap_or(4);
             }
+            "--duese" => {
+                i += 1;
+                let nz: f64 = args[i].replace(',', ".").parse().unwrap_or(0.4);
+                h.print_min_mm = 2.0 * nz;
+                h.print_round_mm = nz / 2.0;
+            }
+            "--ecken" => {
+                i += 1;
+                h.print_round_mm = args[i].replace(',', ".").parse().unwrap_or(0.2);
+            }
+            "--innen" => h.bg_inner = true,
             "--min" => {
                 i += 1;
                 h.print_min_mm = args[i].replace(',', ".").parse().unwrap_or(0.8);
@@ -94,7 +105,7 @@ fn main() {
         i += 1;
     }
     let Some(input) = input else {
-        eprintln!("Aufruf: zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--druck breite_mm] [--farben n] [--min mm] [--grund mm] [--rand mm] [--hoehe mm]  (Ausgabe .svg .png .step .3mf)");
+        eprintln!("Aufruf: zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--innen] [--druck breite_mm] [--duese 0.2|0.4] [--farben n] [--min mm] [--ecken mm] [--grund mm] [--rand mm] [--hoehe mm]  (Ausgabe .svg .png .step .3mf)");
         std::process::exit(2);
     };
     let (w, hh, img) = vector::decode_png(&std::fs::read(&input).expect("Bild lesen")).unwrap_or_else(|e| {

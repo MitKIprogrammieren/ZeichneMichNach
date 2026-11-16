@@ -865,7 +865,10 @@ impl VectorTab {
                         ui.scope(|ui| {
                             ui.spacing_mut().interact_size = Vec2::new(34.0, 34.0);
                             if egui::color_picker::color_edit_button_srgb(ui, &mut c).changed() {
-                                action = Some(Box::new(move |d: &mut Doc| d.groups[gi].over = Some(c)));
+                                action = Some(Box::new(move |d: &mut Doc| {
+                                    d.groups[gi].over = Some(c);
+                                    d.groups[gi].fixed = true;
+                                }));
                             }
                         });
                         ui.vertical(|ui| {
@@ -899,7 +902,7 @@ impl VectorTab {
                                         self.pick = None;
                                         action = Some(Box::new(move |d: &mut Doc| {
                                             d.groups[gi].src.retain(|&x| x != p);
-                                            d.groups.push(vector::Group { src: vec![p], over: None, transp: false });
+                                            d.groups.push(vector::Group { src: vec![p], over: None, transp: false, fixed: true });
                                         }));
                                     }
                                 }
@@ -1026,8 +1029,9 @@ impl VectorTab {
             theme::hint(ui, t, "Statt nur Pixelflächen nachzuziehen, wird das Bild erst verstanden. Läuft komplett auf deinem Mac, ohne Internet.");
         });
         ui.add_space(6.0);
-        let rows: [(&str, &str, bool); 5] = [
-            ("Hintergrund außen freistellen", "Einfarbiger Rand um das Motiv wird transparent", h.bg_cut),
+        let rows: [(&str, &str, bool); 6] = [
+            ("Hintergrund entfernen", "Ruhiger Rand um das Motiv wird transparent – auch mit Verlauf oder Vignette", h.bg_cut),
+            ("Auch Innenflächen", "Flächen in Hintergrundfarbe im Motiv (z. B. im „O“) ebenfalls entfernen", h.bg_inner),
             ("Text erkennen & ersetzen", "Apple-Texterkennung, passende Schrift von deinem Mac – auch fett und dünn gemischt", h.text),
             ("Feine Linien als Striche", "Spielfeld- und Rahmenlinien bleiben durchgehend, Kreise werden echte Kreise", h.lines),
             ("Fotobereiche beruhigen", "Fotos und Muster (Waben, Raster) werden weiche Flächen statt Flecken", h.photo),
@@ -1049,10 +1053,11 @@ impl VectorTab {
             }
         });
         h.bg_cut = vals[0];
-        h.text = vals[1];
-        h.lines = vals[2];
-        h.photo = vals[3];
-        h.gradients = vals[4];
+        h.bg_inner = vals[1] && vals[0];
+        h.text = vals[2];
+        h.lines = vals[3];
+        h.photo = vals[4];
+        h.gradients = vals[5];
         if h.photo && on {
             ui.add_space(6.0);
             theme::card(ui, t, |ui| {
@@ -1142,6 +1147,7 @@ impl VectorTab {
                 if theme::segmented(ui, t, &mut nz, &[(0.2, "0,2"), (0.4, "0,4"), (0.6, "0,6"), (0.8, "0,8")], false) {
                     self.nozzle = nz;
                     h.print_min_mm = 2.0 * nz;
+                    h.print_round_mm = nz / 2.0;
                     commit = true;
                 }
             });
@@ -1150,7 +1156,12 @@ impl VectorTab {
                     commit = true;
                 }
             });
-            theme::hint(ui, t, "Standard: 2 × Düse. Dünnere Striche werden auf diese Breite verstärkt.");
+            theme::row(ui, t, "Ecken abrunden", |ui| {
+                if num(ui, &mut h.print_round_mm, 0.0..=5.0, 0.01, 2, " mm") {
+                    commit = true;
+                }
+            });
+            theme::hint(ui, t, "Standard: schmalste Stelle 2 × Düse, Ecken mit halber Düse abgerundet. Dünnere Striche werden verstärkt, Spitzen rund.");
             ui.label(RichText::new("Fotobereiche").color(t.text));
             let mut ph = h.print_photo;
             if theme::segmented(ui, t, &mut ph, &[(0u8, "Eine Farbe"), (1u8, "Ruhige Stufen"), (2u8, "So lassen")], true) {

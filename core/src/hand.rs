@@ -15,6 +15,8 @@ pub struct HandOpts {
     pub bg_cut: bool,
     /// Farbabstand für das Freistellen (0…100)
     pub bg_tol: f64,
+    /// beim Freistellen auch eingeschlossene Flächen in Hintergrundfarbe entfernen
+    pub bg_inner: bool,
     pub lines: bool,
     pub photo: bool,
     pub gradients: bool,
@@ -27,6 +29,8 @@ pub struct HandOpts {
     pub print_min_mm: f64,
     /// höchstens so viele Farben (AMS)
     pub print_colors: usize,
+    /// spitze Ecken mit diesem Radius abrunden (mm, 0 = aus)
+    pub print_round_mm: f64,
     /// Fotobereiche im Druck: 0 = eine Farbe, 1 = ruhige Stufen, 2 = so lassen
     pub print_photo: u8,
     /// feste Filamentfarben (leer = automatisch)
@@ -38,6 +42,7 @@ impl Default for HandOpts {
         HandOpts {
             bg_cut: true,
             bg_tol: 28.0,
+            bg_inner: false,
             lines: true,
             photo: true,
             gradients: true,
@@ -46,6 +51,7 @@ impl Default for HandOpts {
             print_width_mm: 100.0,
             print_min_mm: 0.8,
             print_colors: 4,
+            print_round_mm: 0.2,
             print_photo: 0,
             print_palette: Vec::new(),
         }
@@ -197,20 +203,88 @@ fn inpaint(d: &mut [u8], w: usize, h: usize, mask: &[bool]) {
 // ---------------------------------------------------------------------------
 // 1. Hintergrund außen freistellen
 
-/// Vom Bildrand aus alles mit randähnlicher Farbe transparent machen.
-/// Rückgabe: Anteil der freigestellten Pixel.
+/// Hintergrundfarbe als glatte Fläche über das Bild: c(x, y) = a + bx + cy + dx² + ey² + fxy
+/// je Kanal, aus den Randpixeln geschätzt (kleinste Quadrate). Einfarbig ist der Sonderfall.
+fn bg_model(d: &[u8], w: usize, h: usize, pts: &[usize]) -> Option<[[f64; 6]; 3]> {
+    let (sx, sy) = (2.0 / (w.max(2) - 1) as f64, 2.0 / (h.max(2) - 1) as f64);
+    let terms = |p: usize| {
+        let (x, y) = ((p % w) as f64 * sx - 1.0, (p / w) as f64 * sy - 1.0);
+        [1.0, x, y, x * x, y * y, x * y]
+    };
+    let mut ata = [[0f64; 6]; 6];
+    let mut atb = [[0f64; 6]; 3];
+    for &p in pts {
+        let t = terms(p);
+        let c = px(d, p);
+        for i in 0..6 {
+            for j in 0..6 {
+                ata[i][j] += t[i] * t[j];
+            }
+            for k in 0..3 {
+                atb[k][i] += t[i] * c[k];
+            }
+        }
+    }
+    let mut out = [[0f64; 6]; 3];
+    for k in 0..3 {
+        // Gauß-Elimination mit kleiner Dämpfung (Ränder decken das Innere nur dünn ab)
+        let mut m = ata;
+        let mut v = atb[k];
+        for i in 1..6 {
+            m[i][i] += 1e-3 * pts.len() as f64;
+        }
+        for i in 0..6 {
+            let piv = (i..6).max_by(|&a, &b| m[a][i].abs().partial_cmp(&m[b][i].abs()).unwrap())?;
+            m.swap(i, piv);
+            v.swap(i, piv);
+            if m[i][i].abs() < 1e-12 {
+                return None;
+            }
+            for r in i + 1..6 {
+                let f = m[r][i] / m[i][i];
+                for c in i..6 {
+                    m[r][c] -= f * m[i][c];
+                }
+                v[r] -= f * v[i];
+            }
+        }
+        for i in (0..6).rev() {
+            let mut acc = v[i];
+            for c in i + 1..6 {
+                acc -= m[i][c] * out[k][c];
+            }
+            out[k][i] = acc / m[i][i];
+        }
+    }
+    Some(out)
+}
+
+fn bg_at(m: &[[f64; 6]; 3], w: usize, h: usize, p: usize) -> [f64; 3] {
+    let (x, y) = ((p % w) as f64 * 2.0 / (w.max(2) - 1) as f64 - 1.0, (p / w) as f64 * 2.0 / (h.max(2) - 1) as f64 - 1.0);
+    let t = [1.0, x, y, x * x, y * y, x * y];
+    [0, 1, 2].map(|k| (0..6).map(|i| m[k][i] * t[i]).sum::<f64>())
+}
+
+/// Hintergrund entfernen: alles, was vom Rand her zusammenhängend der Hintergrundfarbe
+/// entspricht, wird transparent. Die Hintergrundfarbe darf über das Bild verlaufen
+/// (Farbverlauf, Vignette, ungleichmäßig ausgeleuchteter Scan). `inner`: auch
+/// eingeschlossene Flächen in Hintergrundfarbe entfernen (Inneres von „O“, „A“ …).
+/// Rückgabe: entfernter Anteil (0…1); 0, wenn der Rand kein ruhiger Hintergrund ist.
 pub fn cut_background(d: &mut [u8], w: usize, h: usize, tol: f64) -> f64 {
+    cut_background_ex(d, w, h, tol, false)
+}
+
+pub fn cut_background_ex(d: &mut [u8], w: usize, h: usize, tol: f64, inner: bool) -> f64 {
     let n = w * h;
-    if n == 0 {
+    if n == 0 || w < 3 || h < 3 {
         return 0.0;
     }
-    // Randfarbe: Median der Randpixel je Kanal
     let mut border: Vec<usize> = Vec::new();
     for x in 0..w {
         border.push(x);
         border.push((h - 1) * w + x);
     }
-    for y in 0..h {
+    for y in 1..h - 1 {
         border.push(y * w);
         border.push(y * w + w - 1);
     }
@@ -218,24 +292,22 @@ pub fn cut_background(d: &mut [u8], w: usize, h: usize, tol: f64) -> f64 {
     if opaque.len() * 2 < border.len() {
         return 0.0; // schon weitgehend transparent
     }
-    let mut ch: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
-    for &p in &opaque {
-        for k in 0..3 {
-            ch[k].push(d[p * 4 + k]);
+    // zwei Durchgänge: Modell schätzen, Ausreißer (Motiv berührt den Rand) weglassen, neu schätzen
+    let Some(mut model) = bg_model(d, w, h, &opaque) else { return 0.0 };
+    let inl: Vec<usize> = opaque.iter().copied().filter(|&p| cdist(px(d, p), bg_at(&model, w, h, p)) < tol * 1.5).collect();
+    if inl.len() * 10 >= opaque.len() * 6 {
+        if let Some(m2) = bg_model(d, w, h, &inl) {
+            model = m2;
         }
     }
-    let mut bg = [0f64; 3];
-    for k in 0..3 {
-        ch[k].sort();
-        bg[k] = ch[k][ch[k].len() / 2] as f64;
-    }
-    // nur freistellen, wenn der Rand wirklich einfarbig ist
-    let uniform = opaque.iter().filter(|&&p| cdist(px(d, p), bg) < tol).count();
-    if uniform * 10 < opaque.len() * 8 {
+    // nur freistellen, wenn der Rand wirklich ruhiger Hintergrund ist
+    let fits: Vec<usize> = opaque.iter().copied().filter(|&p| cdist(px(d, p), bg_at(&model, w, h, p)) < tol).collect();
+    if fits.len() * 10 < opaque.len() * 8 {
         return 0.0;
     }
+    let is_bg = |d: &[u8], p: usize, t: f64| d[p * 4 + 3] < 128 || cdist(px(d, p), bg_at(&model, w, h, p)) < t;
     let mut seen = vec![false; n];
-    let mut stack: Vec<usize> = opaque.into_iter().filter(|&p| cdist(px(d, p), bg) < tol).collect();
+    let mut stack: Vec<usize> = fits;
     for &p in &stack {
         seen[p] = true;
     }
@@ -248,18 +320,55 @@ pub fn cut_background(d: &mut [u8], w: usize, h: usize, tol: f64) -> f64 {
             if y + 1 < h { Some(p + w) } else { None },
         ];
         for q in nb.into_iter().flatten() {
-            if !seen[q] && (d[q * 4 + 3] < 128 || cdist(px(d, q), bg) < tol) {
+            if !seen[q] && is_bg(d, q, tol) {
                 seen[q] = true;
                 stack.push(q);
             }
         }
     }
-    // Saum: halbtransparente Kantenpixel zwischen Hintergrund und Motiv mitnehmen,
-    // wenn sie deutlich näher an der Randfarbe liegen
+    if inner {
+        // eingeschlossene Flächen in Hintergrundfarbe – nur echte Flächen, keine Krümel
+        let minsz = (n / 4000).max(12);
+        let mut done = seen.clone();
+        for s0 in 0..n {
+            if done[s0] || !is_bg(d, s0, tol * 0.8) {
+                continue;
+            }
+            let mut comp = vec![s0];
+            done[s0] = true;
+            let mut i = 0;
+            while i < comp.len() {
+                let p = comp[i];
+                i += 1;
+                let (x, y) = (p % w, p / w);
+                for q in [
+                    if x > 0 { Some(p - 1) } else { None },
+                    if x + 1 < w { Some(p + 1) } else { None },
+                    if y > 0 { Some(p - w) } else { None },
+                    if y + 1 < h { Some(p + w) } else { None },
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if !done[q] && is_bg(d, q, tol * 0.8) {
+                        done[q] = true;
+                        comp.push(q);
+                    }
+                }
+            }
+            if comp.len() >= minsz {
+                for p in comp {
+                    seen[p] = true;
+                }
+            }
+        }
+    }
+    // Saum: Kantenpixel zwischen Hintergrund und Motiv mitnehmen,
+    // wenn sie deutlich näher an der Hintergrundfarbe liegen
     let grown = morph_mask(&seen, w, h, 1, true);
     let mut cnt = 0usize;
     for p in 0..n {
-        let cut = seen[p] || (grown[p] && cdist(px(d, p), bg) < tol * 1.6);
+        let cut = seen[p] || (grown[p] && is_bg(d, p, tol * 1.6));
         if cut {
             d[p * 4 + 3] = 0;
             cnt += 1;
@@ -597,6 +706,89 @@ fn snap_corners(lines: &mut [LineOut], s: f64) {
 
 /// Feine helle oder dunkle Linien finden. Stücke derselben Geraden werden über
 /// Kreuzungen hinweg verbunden, Kreisbögen zu Kreisen ergänzt.
+/// Farbe und Breite einer dünnen Linie aus dem Mischbild zurückrechnen.
+/// Jeder Pixel ist Untergrund B und Linienfarbe L gemischt: P = B + α·(L − B).
+/// Ohne vollständig gedeckten Pixel (keine „Hochebene“ in der Mitte) ist L unbekannt;
+/// dann wird von B über die gemessene Mischfarbe hinaus bis an den Farbraumrand
+/// verlängert (höchstens 3-fach) – Logo-Linien sind fast immer satt oder dunkel.
+/// Die Breite folgt aus der aufsummierten Deckung α.
+fn unmix_line(d: &[u8], w: usize, h: usize, ch: &[usize], raw: &[bool], rr: i64, mix: [f64; 3], sc: f64) -> Option<([f64; 3], f64)> {
+    // Untergrund: Pixel knapp außerhalb der Linie
+    let (mut bsum, mut bn) = ([0f64; 3], 0usize);
+    let o = rr + 2;
+    for &p in ch.iter().step_by(2) {
+        let (x, y) = ((p % w) as i64, (p / w) as i64);
+        for (dx, dy) in [(o, 0), (-o, 0), (0, o), (0, -o)] {
+            let (xx, yy) = (x + dx, y + dy);
+            if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 {
+                continue;
+            }
+            let q = yy as usize * w + xx as usize;
+            if raw[q] || d[q * 4 + 3] < 128 {
+                continue;
+            }
+            let c = px(d, q);
+            for k in 0..3 {
+                bsum[k] += c[k];
+            }
+            bn += 1;
+        }
+    }
+    if bn < 8 {
+        return None;
+    }
+    let b = bsum.map(|v| v / bn as f64);
+    let dir = [mix[0] - b[0], mix[1] - b[1], mix[2] - b[2]];
+    let dl = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+    if dl < 40.0 {
+        return None;
+    }
+    // Deckung je Pixel im Umfeld (Projektion auf die Richtung B → Mischfarbe)
+    let mut seen = std::collections::HashSet::new();
+    let (mut asum, mut plateau) = (0f64, 0usize);
+    let len = ch.len().max(1) as f64;
+    for &p in ch {
+        let (x, y) = ((p % w) as i64, (p / w) as i64);
+        for dy in -rr..=rr {
+            for dx in -rr..=rr {
+                let (xx, yy) = (x + dx, y + dy);
+                if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 {
+                    continue;
+                }
+                let q = yy as usize * w + xx as usize;
+                if !seen.insert(q) {
+                    continue;
+                }
+                let c = px(d, q);
+                let a = ((c[0] - b[0]) * dir[0] + (c[1] - b[1]) * dir[1] + (c[2] - b[2]) * dir[2]) / (dl * dl);
+                if a > 0.15 {
+                    asum += a.min(1.3);
+                }
+                if a > 0.92 {
+                    plateau += 1;
+                }
+            }
+        }
+    }
+    // Hochebene breiter als ~1,5 Quellpixel: Linie ist aufgelöst, Mischfarbe stimmt
+    let resolved = plateau as f64 / len >= 1.5 * sc.max(1.0);
+    let mut t = 1.0f64;
+    if !resolved {
+        t = 3.0;
+        for k in 0..3 {
+            if dir[k] < -1e-6 {
+                t = t.min(b[k] / -dir[k]);
+            } else if dir[k] > 1e-6 {
+                t = t.min((255.0 - b[k]) / dir[k]);
+            }
+        }
+        t = t.max(1.0);
+    }
+    let col = [0, 1, 2].map(|k| (b[k] + t * dir[k]).clamp(0.0, 255.0));
+    let width = asum / len / t;
+    Some((col, width))
+}
+
 /// Rückgabe: Linien (Analysepixel) und Maske zum Übermalen.
 pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (Vec<LineOut>, Vec<bool>) {
     let n = w * h;
@@ -669,7 +861,13 @@ pub fn find_lines(d: &[u8], w: usize, h: usize, sc: f64, keep_out: &[bool]) -> (
                     }
                 }
             }
-            let width = (near.len() as f64 / len.max(1.0)).clamp(1.0, 2.0 * r as f64);
+            let mut width = (near.len() as f64 / len.max(1.0)).clamp(1.0, 2.0 * r as f64);
+            // Dünne Linien sind im Bild mit dem Untergrund vermischt (Kantenglättung,
+            // Verkleinerung): Farbe und Breite entmischen. Untergrund = Saum außerhalb der Linie.
+            if let Some((c2, w2)) = unmix_line(d, w, h, &ch, &raw, rr, col, sc) {
+                col = c2;
+                width = w2.clamp(1.0, 2.0 * r as f64);
+            }
             // Kette gierig in Kreisbögen und gerade Stücke zerlegen (eine Kette kann
             // über eine Kreuzung hinweg von einem Kreis in eine Gerade übergehen)
             let np = pts.len();
@@ -1554,7 +1752,7 @@ pub fn prepare(doc: &mut Doc, o: &Opts, h: &HandOpts, text_boxes: &[[f64; 4]]) {
     res.flat = is_flat(&doc.data, w, hh);
     let h = &effective(h, res.flat);
     if h.bg_cut {
-        cut_background(&mut doc.data, w, hh, h.bg_tol);
+        cut_background_ex(&mut doc.data, w, hh, h.bg_tol, h.bg_inner);
     }
     let mut keep = vec![false; w * hh];
     for b in text_boxes {
@@ -1696,6 +1894,10 @@ fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
     doc.apply_map(o);
     if h.print {
         print_fix(doc, h);
+        if h.print_round_mm > 0.0 {
+            let ppm = doc.w as f64 / h.print_width_mm.max(1.0);
+            round_corners(doc, (h.print_round_mm * ppm) as f32);
+        }
     }
     doc.vectorize(o);
     if h.print {
@@ -1832,7 +2034,7 @@ fn map_palette(doc: &mut Doc, pal: &[[u8; 3]]) {
             }
             None => {
                 slot_of[pi] = Some(merged.len());
-                merged.push(vector::Group { src: doc.groups[gi].src.clone(), over: Some(pal[pi]), transp: false });
+                merged.push(vector::Group { src: doc.groups[gi].src.clone(), over: Some(pal[pi]), transp: false, fixed: false });
             }
         }
     }
@@ -1911,6 +2113,91 @@ fn dilate_round(m: &[bool], w: usize, h: usize, r: f32) -> Vec<bool> {
     let d = dist_in(&inv, w, h);
     (0..w * h).map(|p| m[p] || d[p] <= r).collect()
 }
+
+/// Spitze Ecken abrunden und Kanten beruhigen: jede Farbe als weiche Maske
+/// (Kastenfilter, dreimal ≈ Gauß mit Radius r), jedes Pixel bekommt die Farbe mit
+/// dem höchsten Anteil. Spitzen werden zu Bögen mit etwa Radius r, innen wie außen;
+/// Flächen und Striche breiter als ~2r bleiben unverändert.
+fn round_corners(doc: &mut Doc, r: f32) {
+    let (w, h) = (doc.w, doc.h);
+    let n = w * h;
+    if r < 1.0 || doc.g.len() != n {
+        return;
+    }
+    let br = ((r * 0.75).round() as usize).max(1);
+    let labels: Vec<i16> = {
+        let mut v: Vec<i16> = doc.g.clone();
+        v.sort();
+        v.dedup();
+        v
+    };
+    if labels.len() < 2 {
+        return;
+    }
+    let blur = |m: &mut Vec<f32>| {
+        let mut t = vec![0f32; n];
+        for _ in 0..3 {
+            for y in 0..h {
+                let row = &m[y * w..(y + 1) * w];
+                let mut acc = 0f32;
+                let mut cnt = 0f32;
+                for x in 0..br.min(w) {
+                    acc += row[x];
+                    cnt += 1.0;
+                }
+                for x in 0..w {
+                    if x + br < w {
+                        acc += row[x + br];
+                        cnt += 1.0;
+                    }
+                    if x > br {
+                        acc -= row[x - br - 1];
+                        cnt -= 1.0;
+                    }
+                    t[y * w + x] = acc / cnt;
+                }
+            }
+            for x in 0..w {
+                let mut acc = 0f32;
+                let mut cnt = 0f32;
+                for y in 0..br.min(h) {
+                    acc += t[y * w + x];
+                    cnt += 1.0;
+                }
+                for y in 0..h {
+                    if y + br < h {
+                        acc += t[(y + br) * w + x];
+                        cnt += 1.0;
+                    }
+                    if y > br {
+                        acc -= t[(y - br - 1) * w + x];
+                        cnt -= 1.0;
+                    }
+                    m[y * w + x] = acc / cnt;
+                }
+            }
+        }
+    };
+    let mut best = vec![0f32; n];
+    let mut out = doc.g.clone();
+    for &l in &labels {
+        let mut m: Vec<f32> = doc.g.iter().map(|&g| if g == l { 1.0 } else { 0.0 }).collect();
+        blur(&mut m);
+        for p in 0..n {
+            // bei Gleichstand bleibt die bisherige Farbe
+            if m[p] > best[p] + 1e-4 || (doc.g[p] == l && m[p] >= best[p] - 1e-4) {
+                best[p] = m[p];
+                out[p] = l;
+            }
+        }
+    }
+    if std::env::var_os("ZMN_DEBUG").is_some() {
+        let c = |g: &[i16]| labels.iter().map(|&l| g.iter().filter(|&&x| x == l).count()).collect::<Vec<_>>();
+        eprintln!("    Ecken abrunden (r {:.1} px): {:?} → {:?}", r, c(&doc.g), c(&out));
+    }
+    doc.g = out;
+}
+
 
 /// Aufbereitung für den 3D-Druck: Linien und Text als Flächen mit
 /// Mindeststärke einbrennen, dann jede Farbe rund öffnen – schmale Streifen,
@@ -2060,7 +2347,7 @@ fn print_fix(doc: &mut Doc, h: &HandOpts) {
                 });
                 // durchsichtige Teile werden nie verbreitert (nur Löcher füllen)
                 if lab >= 0 && (len >= 2.5 * rmin || (attached && len >= 1.2 * rmin)) {
-                    thicken.push((comp.clone(), lab, (rmin - half + 0.7).max(0.0)));
+                    thicken.push((comp.clone(), lab, (rmin - half + 2.0).max(0.0)));
                 }
                 for p in comp {
                     orphan[p] = true;
@@ -2239,7 +2526,7 @@ fn flat_colors(doc: &Doc) -> Vec<[f64; 3]> {
 
 /// Gruppen direkt aus den Grundfarben bilden: jeder Ton zur nächsten Grundfarbe.
 fn groups_from(doc: &mut Doc, reps: &[[f64; 3]]) {
-    let mut groups: Vec<vector::Group> = reps.iter().map(|r| vector::Group { src: Vec::new(), over: Some(r.map(|v| v.round() as u8)), transp: false }).collect();
+    let mut groups: Vec<vector::Group> = reps.iter().map(|r| vector::Group { src: Vec::new(), over: Some(r.map(|v| v.round() as u8)), transp: false, fixed: false }).collect();
     for (i, c) in doc.q.pal.iter().enumerate() {
         let c = c.map(|v| v as f64);
         let mut gi = (0..reps.len()).min_by(|&a, &b| cdist(c, reps[a]).partial_cmp(&cdist(c, reps[b])).unwrap()).unwrap();
@@ -2388,7 +2675,7 @@ fn nearest_group_ex(doc: &mut Doc, c: [u8; 3], allow_new: bool) -> usize {
     if best.0 < 14.0 || !allow_new {
         return best.1;
     }
-    doc.groups.push(vector::Group { src: Vec::new(), over: Some(c), transp: false });
+    doc.groups.push(vector::Group { src: Vec::new(), over: Some(c), transp: false, fixed: false });
     doc.groups.len() - 1
 }
 

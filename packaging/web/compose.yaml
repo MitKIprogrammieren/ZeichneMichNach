@@ -1,0 +1,14 @@
+# ZeichneMichNach im Browser – http://<server>:8094
+services:
+  zeichnemichnach:
+    image: ghcr.io/mitkiprogrammieren/zeichnemichnach-web:latest
+    ports:
+      - "8094:8094"
+    volumes:
+      - ./daten:/daten
+    environment:
+      - TZ=Europe/Berlin
+    init: true
+    stop_grace_period: 5s
+    restart: unless-stopped
+    mem_limit: 3g
