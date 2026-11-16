@@ -38,6 +38,10 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;padding:16p
 .cmp .bar{position:absolute;top:0;bottom:0;left:var(--x);width:2px;background:var(--accent);transform:translateX(-1px);pointer-events:none}
 .cmp .knob{position:absolute;top:50%;left:var(--x);width:28px;height:28px;border-radius:50%;background:var(--accent);transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 3px rgba(0,0,0,.25)}
 .cmp input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:ew-resize;margin:0}
+.cmp.v1 .orig,.cmp.v1 .bar,.cmp.v1 .knob,.cmp.v1 .tag,.cmp.v2 .bar,.cmp.v2 .knob,.cmp.v2 .tag{display:none}
+.cmp.v1 .res{clip-path:none}
+.cmp.v2 .orig{clip-path:none}.cmp.v2 .res{clip-path:none}
+.cmp.v1 input,.cmp.v2 input{display:none}
 .tag{position:absolute;top:10px;font-size:12px;color:var(--muted);background:var(--card);padding:2px 8px;border-radius:6px;pointer-events:none}
 .tag.l{left:10px}.tag.r{right:10px}
 .busy{position:absolute;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:#fff;z-index:3}
@@ -45,7 +49,7 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;padding:16p
 .spin{width:34px;height:34px;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:s 0.8s linear infinite}
 @keyframes s{to{transform:rotate(360deg)}}
 .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
-.chip{background:var(--card);color:var(--muted);font-size:12px;padding:3px 9px;border-radius:7px;display:flex;align-items:center;gap:6px}
+.chip{background:var(--card);color:var(--muted);font-size:12px;padding:3px 9px;border-radius:7px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .sw{width:12px;height:12px;border-radius:3px;border:1px solid rgba(128,128,128,.45)}
 .side{display:flex;flex-direction:column;gap:10px}
 h3{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--muted);text-transform:none;letter-spacing:.02em}
@@ -109,6 +113,7 @@ a{color:var(--accent)}
 <div class="bar"></div><div class="knob"></div>
 <input type="range" id="slider" min="0" max="100" value="50" aria-label="Vergleich Original und SVG">
 <span class="tag l">Original</span><span class="tag r">SVG</span>
+<div class="seg" id="ansicht" style="position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:2;background:var(--card)"><button data-v="0" class="on">Vergleich</button><button data-v="1">Vektor</button><button data-v="2">Konturen</button></div>
 </div>
 <div class="busy" id="busy"><div class="spin"></div><div id="busyT">Zeichne nach …</div></div>
 </div>
@@ -117,9 +122,12 @@ a{color:var(--accent)}
 </section>
 <aside class="side">
 <div class="card">
-<h3>Farben</h3>
-<div class="row"><label>Anzahl</label><div class="seg" style="width:150px"><button data-k="auto" class="on">Auto</button><button data-k="zahl">Zahl</button></div></div>
-<div class="row hidden" id="kRow"><label>Farben</label><div class="num"><input id="k" type="number" min="1" max="32" value="4" inputmode="numeric"></div></div>
+<h3>Bild</h3>
+<div class="row"><label>Bildart</label><div class="seg" id="bildart" style="width:250px"><button data-v="0" class="on">Auto</button><button data-v="1">Logo</button><button data-v="2">Illustration</button></div></div>
+<div class="hint" id="bildartHint">Logo: wenige saubere Farben, Linien und Text. Illustration: viele Farbflächen mit Schattierung, wie bei gezeichneten Figuren.</div>
+<div class="row" style="margin-top:6px"><label>Farben</label>
+<div class="seg" style="width:150px"><button data-k="auto" class="on">Auto</button><button data-k="zahl">Zahl</button></div></div>
+<div class="row hidden" id="kRow"><label>Anzahl</label><div class="num"><input id="k" type="number" min="1" max="32" value="4" inputmode="numeric"></div></div>
 </div>
 <div class="card">
 <h3>Nachzeichnen wie von Hand</h3>
@@ -157,6 +165,8 @@ a{color:var(--accent)}
 <div class="card hidden" id="textCard"><h3>Erkannter Text</h3><div class="texts" id="texts"></div></div>
 <div class="card">
 <h3>Speichern</h3>
+<div class="row"><label style="white-space:nowrap">Optimieren für</label><div class="seg" id="stil" style="width:240px"><button data-v="0" class="on">Allgemein</button><button data-v="1">Gestapelt</button><button data-v="2">Schneiden</button></div></div>
+<div class="hint" id="stilHint" style="margin-bottom:8px">Allgemein: Flächen ohne Überlappung. Gestapelt: Formen liegen übereinander, nach Farbe gruppiert – leicht umzufärben. Schneiden: nur Konturen als dünne Striche (Laser, Plotter, Gravur).</div>
 <div class="dl">
 <button class="btn pri" data-f="svg" disabled>SVG</button>
 <button class="btn" data-f="png" disabled>PNG</button>
@@ -186,7 +196,8 @@ a{color:var(--accent)}
 <script>
 const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
 let file = null, sid = null, origUrl = null, timer = null, running = 0;
-const st = { k: 'auto', duese: 0.4, fotob: 0 };
+const st = { k: 'auto', duese: 0.4, fotob: 0, bildart: 0, stil: 0, ansicht: 0 };
+let lastSvg = '';
 const store = { get(k, d) { try { return localStorage.getItem('zmn.' + k) ?? d } catch { return d } }, set(k, v) { try { localStorage.setItem('zmn.' + k, v) } catch {} } };
 
 function applyTheme(v) {
@@ -202,7 +213,7 @@ addEventListener('keydown', e => { if (e.shiftKey && (e.metaKey || e.ctrlKey) &&
 // gespeicherte Eingaben wiederherstellen
 const inputs = ['k', 'freistellen', 'innen', 'text', 'linien', 'foto', 'verlauf', 'druck', 'breite', 'farbenDruck', 'min', 'ecken', 'grund', 'hoehe', 'rand', 'grundfarbe', 'randfarbe'];
 for (const id of inputs) { const el = $('#' + id), v = store.get(id, null); if (v !== null) { if (el.type === 'checkbox') el.checked = v === '1'; else el.value = v } }
-st.k = store.get('kmode', 'auto'); st.duese = +store.get('duese', 0.4); st.fotob = +store.get('fotob', 0);
+st.k = store.get('kmode', 'auto'); st.duese = +store.get('duese', 0.4); st.fotob = +store.get('fotob', 0); st.bildart = +store.get('bildart', 0); st.stil = +store.get('stil', 0);
 
 function seg(sel, key, cb) {
   $$(sel + ' button').forEach(b => {
@@ -211,7 +222,15 @@ function seg(sel, key, cb) {
   });
 }
 $$('.seg button[data-k]').forEach(b => b.closest('.seg').id || (b.closest('.seg').id = 'kseg'));
-seg('#kseg', 'k', sync); seg('#duese', 'duese', () => { $('#min').value = (2 * st.duese).toFixed(2); $('#ecken').value = (st.duese / 2).toFixed(2); store.set('min', $('#min').value); store.set('ecken', $('#ecken').value); sync() }); seg('#fotob', 'fotob');
+seg('#kseg', 'k', sync); seg('#duese', 'duese', () => { $('#min').value = (2 * st.duese).toFixed(2); $('#ecken').value = (st.duese / 2).toFixed(2); store.set('min', $('#min').value); store.set('ecken', $('#ecken').value); sync() }); seg('#fotob', 'fotob'); seg('#bildart', 'bildart'); seg('#stil', 'stil');
+$$('#ansicht button').forEach(b => b.onclick = () => { st.ansicht = +b.dataset.v; $$('#ansicht button').forEach(x => x.classList.toggle('on', x === b)); show() });
+function show() {
+  const c = $('#cmp'); c.classList.toggle('v1', st.ansicht === 1); c.classList.toggle('v2', st.ansicht === 2);
+  if (!lastSvg) return;
+  // Konturen: alle Formen nur als dünne Linien über dem Original
+  const svg = st.ansicht === 2 ? lastSvg.replace(/<svg([^>]*)>/, '<svg$1><style>*{fill:none!important;stroke:#22d3ee!important;stroke-width:1px!important;vector-effect:non-scaling-stroke}</style>') : lastSvg;
+  $('#imgR').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+}
 
 function sync() {
   $('#kRow').classList.toggle('hidden', st.k !== 'zahl');
@@ -228,6 +247,7 @@ function params() {
   for (const id of ['freistellen', 'innen', 'text', 'linien', 'foto', 'verlauf', 'druck']) p.set(id, $('#' + id).checked ? '1' : '0');
   p.set('duese', st.duese); p.set('breite', $('#breite').value); p.set('farben_druck', $('#farbenDruck').value);
   p.set('min', $('#min').value); p.set('ecken', $('#ecken').value); p.set('fotobereiche', st.fotob);
+  p.set('bildart', st.bildart); p.set('stil', st.stil);
   if (file) p.set('name', file.name || 'bild');
   return p;
 }
@@ -243,12 +263,14 @@ async function run() {
     if (my !== running) return;
     if (!r.ok) throw new Error(j.fehler || r.statusText);
     sid = j.id;
-    $('#imgR').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(j.svg);
+    lastSvg = j.svg; show();
     const chips = [`${j.farben.length} Farben`, `${j.formen} Formen`, `${j.knoten} Knoten`];
     if (j.linien) chips.push(`${j.linien} Linien`); if (j.verlaeufe) chips.push(`${j.verlaeufe} Verläufe`);
     if (j.freigestellt) chips.push('Hintergrund entfernt');
+    chips.unshift(j.bildart);
     chips.push(`${j.sekunden.toFixed(1).replace('.', ',')} s`);
-    $('#chips').innerHTML = j.farben.map(c => `<span class="chip"><span class="sw" style="background:${c}"></span>${c}</span>`).join('') + chips.map(c => `<span class="chip">${c}</span>`).join('');
+    const many = j.farben.length > 12;
+    $('#chips').innerHTML = (many ? `<span class="chip">${j.farben.map(c => `<span class="sw" title="${c}" style="background:${c}"></span>`).join('')}</span>` : j.farben.map(c => `<span class="chip"><span class="sw" style="background:${c}"></span>${c}</span>`).join('')) + chips.map(c => `<span class="chip">${c}</span>`).join('');
     $('#note').classList.toggle('hidden', !j.hinweis); $('#note').classList.remove('err'); $('#note').textContent = j.hinweis || '';
     $('#textCard').classList.toggle('hidden', !j.texte.length);
     $('#texts').innerHTML = j.texte.map(t => `<div><span>„${esc(t.text)}“</span><small>${esc(t.schrift)} ${esc(t.schnitt)} · ${Math.round(t.treffer * 100)} %</small></div>`).join('');

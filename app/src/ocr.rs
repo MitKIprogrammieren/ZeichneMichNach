@@ -29,7 +29,11 @@ pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<V
     if !cfg!(target_os = "linux") || std::env::var_os("ZMN_OCR_JSON").is_some() {
         return recognize(image, w, h);
     }
-    let mut all = recognize(image, w, h).unwrap_or_default();
+    // Tesseract rät in unruhigen Bildern (Fotos, Illustrationen) gern Text in Formen hinein –
+    // dort nur sehr sichere Zeilen nehmen
+    let busy = !nz_core::hand::is_flat(rgba, w, h);
+    let min_conf = if busy { 0.85 } else { 0.6 };
+    let mut all = recognize_min(image, w, h, min_conf).unwrap_or_default();
     let q = nz_core::vector::quantize(rgba, w, h);
     if !q.pal.is_empty() {
         // ein paar Farben mehr als automatisch – Schrift mit wenig Kontrast soll nicht
@@ -56,7 +60,7 @@ pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<V
             if std::fs::write(&tmp, nz_core::vector::encode_png(w, h, &img)).is_err() {
                 continue;
             }
-            if let Ok(lines) = recognize(&tmp, w, h) {
+            if let Ok(lines) = recognize_min(&tmp, w, h, min_conf) {
                 all.extend(lines);
             }
             let _ = std::fs::remove_file(&tmp);
@@ -67,7 +71,7 @@ pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<V
     all.retain(|l| {
         let t: Vec<char> = l.text.chars().filter(|c| !c.is_whitespace()).collect();
         let an = t.iter().filter(|c| c.is_alphanumeric()).count();
-        an >= 2 && an * 10 >= t.len() * 7
+        an >= if busy { 4 } else { 2 } && an * 10 >= t.len() * 7
     });
     // doppelte Funde (gleiche Stelle) zusammenlegen – der längere Text gewinnt
     let mut out: Vec<TextLine> = Vec::new();
@@ -91,6 +95,11 @@ pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<V
 
 /// Textzeilen im Bild finden (Rechtecke in Pixeln des Quellbilds).
 pub fn recognize(image: &Path, w: usize, h: usize) -> Result<Vec<TextLine>, String> {
+    recognize_min(image, w, h, 0.3)
+}
+
+/// Wie [`recognize`], aber nur Zeilen ab dieser Sicherheit (0…1).
+fn recognize_min(image: &Path, w: usize, h: usize, min_conf: f64) -> Result<Vec<TextLine>, String> {
     let json = if let Some(f) = std::env::var_os("ZMN_OCR_JSON") {
         std::fs::read_to_string(f).map_err(|e| e.to_string())?
     } else {
@@ -107,7 +116,7 @@ pub fn recognize(image: &Path, w: usize, h: usize) -> Result<Vec<TextLine>, Stri
         let text = it.get("text").and_then(|t| t.str()).unwrap_or("").trim().to_string();
         let conf = it.get("conf").and_then(|c| c.num()).unwrap_or(1.0);
         let num = |k: &str| it.get(k).and_then(|x| x.num()).unwrap_or(0.0);
-        if text.chars().filter(|c| c.is_alphanumeric()).count() == 0 || conf < 0.3 {
+        if text.chars().filter(|c| c.is_alphanumeric()).count() == 0 || conf < min_conf {
             continue;
         }
         let (x, y, bw, bh) = (num("x"), num("y"), num("w"), num("h"));

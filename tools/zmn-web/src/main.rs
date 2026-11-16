@@ -98,6 +98,7 @@ fn hand_opts(q: &HashMap<String, String>) -> HandOpts {
     h.bg_cut = flag(q, "freistellen", true);
     h.bg_inner = flag(q, "innen", false);
     h.bg_tol = num(q, "toleranz", h.bg_tol);
+    h.kind = num(q, "bildart", 0.0).clamp(0.0, 2.0) as u8;
     h.text = flag(q, "text", true);
     h.lines = flag(q, "linien", true);
     h.photo = flag(q, "foto", true);
@@ -150,7 +151,16 @@ fn nachzeichnen(mut req: Request, store: &Store) {
     };
     let ho = hand_opts(&q);
     let k = num(&q, "farben", 0.0).clamp(0.0, 32.0) as usize;
-    let o = Opts::default();
+    let mut o = Opts::default();
+    // Ausgabe wie bei vectorizer.ai: 0 = allgemein, 1 = gestapelt (nach Farbe), 2 = nur Konturen (Schneiden/Gravieren)
+    match num(&q, "stil", 0.0) as u8 {
+        1 => o.stack = true,
+        2 => {
+            o.stroke = true;
+            o.stroke_only = true;
+        }
+        _ => {}
+    }
     let mut doc = Doc::new(w, h, rgba);
     // Texterkennung braucht eine Datei
     let tmp = std::env::temp_dir().join(format!("zmn-web-{}.png", id()));
@@ -169,7 +179,7 @@ fn nachzeichnen(mut req: Request, store: &Store) {
     let name = name.rsplit_once('.').map(|x| x.0.to_string()).unwrap_or(name);
     let sid = id();
     let out = format!(
-        "{{\"id\":{},\"svg\":{},\"breite\":{w},\"hoehe\":{h},\"farben\":[{}],\"formen\":{formen},\"knoten\":{knoten},\"linien\":{},\"verlaeufe\":{},\"texte\":[{}],\"hinweis\":{},\"sekunden\":{:.2},\"freigestellt\":{}}}",
+        "{{\"id\":{},\"svg\":{},\"breite\":{w},\"hoehe\":{h},\"farben\":[{}],\"formen\":{formen},\"knoten\":{knoten},\"linien\":{},\"verlaeufe\":{},\"texte\":[{}],\"hinweis\":{},\"sekunden\":{:.2},\"freigestellt\":{},\"bildart\":{}}}",
         quote(&sid),
         quote(&svg),
         farben.join(","),
@@ -178,7 +188,8 @@ fn nachzeichnen(mut req: Request, store: &Store) {
         texte.join(","),
         info.note.as_deref().map(quote).unwrap_or_else(|| "null".into()),
         info.secs,
-        doc.data.chunks(4).any(|p| p[3] == 0)
+        doc.data.chunks(4).any(|p| p[3] == 0),
+        quote(if doc.hand.illu { "Illustration" } else if doc.hand.flat { "flache Grafik" } else { "Logo/Grafik" })
     );
     {
         let mut s = store.lock().unwrap();

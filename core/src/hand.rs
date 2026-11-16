@@ -17,6 +17,8 @@ pub struct HandOpts {
     pub bg_tol: f64,
     /// beim Freistellen auch eingeschlossene Flächen in Hintergrundfarbe entfernen
     pub bg_inner: bool,
+    /// Bildart: 0 = automatisch, 1 = Logo/Grafik, 2 = Illustration (viele Farben, Schattierung)
+    pub kind: u8,
     pub lines: bool,
     pub photo: bool,
     pub gradients: bool,
@@ -43,6 +45,7 @@ impl Default for HandOpts {
             bg_cut: true,
             bg_tol: 28.0,
             bg_inner: false,
+            kind: 0,
             lines: true,
             photo: true,
             gradients: true,
@@ -85,6 +88,8 @@ pub struct HandResult {
     pub texts: usize,
     /// Anteil der Fotobereiche am Bild (0…1)
     pub photo: f64,
+    /// als Illustration behandelt (viele Farbflächen statt Logo-Aufbereitung)
+    pub illu: bool,
     /// Analysebild vor dem Übermalen von Text und Linien (für Verläufe)
     pub orig: Vec<u8>,
     /// Pixel, die zu Text oder Linien gehören und übermalt werden
@@ -1785,13 +1790,38 @@ pub fn prepare(doc: &mut Doc, o: &Opts, h: &HandOpts, text_boxes: &[[f64; 4]]) {
 /// Stufe B: Text und Linien übermalen, Fotobereiche beruhigen, Farben, Pfade,
 /// Text einsetzen, Verläufe. `k` = Farbanzahl (0 = automatisch, etwas reichlicher).
 pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]) {
+    // Illustration (gezeichnete Figuren, Schattierung, Glanzlichter): Hunderte „feine Linien“
+    // sind dort Zeichnung, keine Linien, und Schattierungen sind gewollt – also keine
+    // Fotobereiche vereinfachen, sondern viele saubere Farbflächen wie beim Posterisieren
+    let illu = match h.kind {
+        1 => false,
+        2 => true,
+        _ => !doc.hand.flat && doc.hand.lines.len() >= 250,
+    };
+    doc.hand.illu = illu;
+    let hi;
+    let h = if illu {
+        hi = HandOpts { lines: false, photo: false, gradients: false, ..h.clone() };
+        &hi
+    } else {
+        h
+    };
     let h = &effective(h, doc.hand.flat);
     let (w, hh, sc) = (doc.w, doc.h, doc.sc);
     let n = w * hh;
     let mut erase = std::mem::take(&mut doc.hand.erase);
-    if erase.len() != n {
+    if erase.len() != n || illu {
         erase = vec![false; n];
     }
+    if illu {
+        doc.hand.lines.clear();
+        // Rauschen und JPEG-Blöcke glätten, Kanten bleiben
+        doc.data = vector::bilateral(&doc.data, w, hh, 3, 20.0);
+        if std::env::var_os("ZMN_DEBUG").is_some() {
+            eprintln!("    Bildart: Illustration");
+        }
+    }
+    let k = if illu && k == 0 { 40 } else { k };
     let mut text_px = vec![false; n];
     for t in texts {
         for &p in &t.erase {
@@ -1829,6 +1859,9 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
             }
         }
         doc.hand.photo = frac;
+        if std::env::var_os("ZMN_DEBUG").is_some() {
+            eprintln!("    Fotobereiche: {:.0} % des Bildes", frac * 100.0);
+        }
         if h.print_photo < 2 && busy.len() == n {
             simplify_photo(&mut doc.data, &busy, h.print_photo);
         }
@@ -1854,6 +1887,14 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
 
 /// Zuordnung, ggf. Druckaufbereitung, Pfade, dann Text und Verläufe.
 fn map_and_trace(doc: &mut Doc, o: &Opts, h: &HandOpts) {
+    // Illustration: kleine Splitter in die Nachbarfläche legen (wie „Flächen beruhigen“ 1)
+    let oi;
+    let o = if doc.hand.illu && o.calm < 1.0 {
+        oi = Opts { calm: 1.0, ..o.clone() };
+        &oi
+    } else {
+        o
+    };
     doc.hand.print = h.print;
     if h.print {
         // Farben von Schrift und Linien müssen erhalten bleiben (z. B. weiße Schrift,

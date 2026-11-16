@@ -42,7 +42,7 @@ oder mit `packaging/web/compose.yaml`. Danach `http://<server>:8094` öffnen. Te
 cd tools/zmn-pruefstand && cargo run --release -- ../../pruefstand --anzahl 3
 ```
 
-Erzeugt Testbilder mit bekanntem Original (flach, Wappen, Text, Linien, Verlauf, Freisteller – jeweils sauber, klein und als JPEG), zeichnet sie nach und misst Farbfehler, Fehlpixel, Kantenabstand, Knoten und zu schmale Stellen – auch im Druckmodus (0,4er und 0,2er Düse). VTracer läuft als Vergleichsmaßstab mit. Ergebnis: `bericht.html`, `werte.csv`, `zusammenfassung.txt`. In der Browser-Version unter ⚙︎ startbar.
+Erzeugt Testbilder mit bekanntem Original (flach, Wappen, Text, Linien, Verlauf, Freisteller – jeweils sauber, klein und als JPEG), zeichnet sie nach und misst Farbfehler, Fehlpixel, Kantenabstand, Knoten und zu schmale Stellen – auch im Druckmodus (0,4er und 0,2er Düse). VTracer läuft als Vergleichsmaßstab mit. Ergebnis: `bericht.html`, `werte.csv`, `zusammenfassung.txt`. In der Browser-Version unter ⚙︎ startbar. Eigene Bilder kommen nach `referenzen/` im Prüfstand-Ordner (im Container `daten/pruefstand/referenzen/`): Original als PNG/JPG, optional eine fremde SVG gleichen Namens (z. B. von vectorizer.ai) zum Vergleich.
 
 ## Kommandozeile
 

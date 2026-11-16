@@ -338,6 +338,66 @@ fn schmal(svg: &str, db: &Arc<resvg::usvg::fontdb::Database>, min_mm: f64) -> f6
     100.0 * lost as f64 / tot.max(1) as f64
 }
 
+/// Eigene Referenzbilder: Original (PNG/JPG) + optional fremde SVG gleichen Namens
+/// (z. B. von vectorizer.ai). Beide werden gegen das Original gemessen.
+fn referenzen(dir: &Path, out: &Path, db: &Arc<resvg::usvg::fontdb::Database>) -> String {
+    let mut rep = String::new();
+    let Ok(rd) = std::fs::read_dir(dir) else { return rep };
+    let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| matches!(p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(), Some("png" | "jpg" | "jpeg" | "webp"))).collect();
+    files.sort();
+    for f in files {
+        let Ok(img) = image::open(&f) else { continue };
+        let img = img.to_rgba8();
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let rgba = img.into_raw();
+        let truth = on_white(&rgba);
+        let stem = f.file_stem().unwrap().to_string_lossy().to_string();
+        // freigestellte Bereiche der SVG auf der Randfarbe des Originals zeigen
+        let bgc = {
+            let mut c = [0f64; 3];
+            let mut nn = 0.0;
+            for x in 0..w {
+                for y in [0, h - 1] {
+                    for k in 0..3 {
+                        c[k] += truth[y * w + x][k] as f64;
+                    }
+                    nn += 1.0;
+                }
+            }
+            c.map(|v| (v / nn) as f32)
+        };
+        let measure = |svg: &str| -> (f64, f64, usize) {
+            let r = render(svg, w as u32, h as u32, db).unwrap_or_else(|_| vec![0; w * h * 4]);
+            let p: Vec<[f32; 3]> = r.chunks(4).map(|q| {
+                let a = q[3] as f32 / 255.0;
+                [0, 1, 2].map(|k| q[k] as f32 * a + bgc[k] * (1.0 - a))
+            }).collect();
+            let (mut sum, mut bad) = (0.0f64, 0usize);
+            for (a, b) in truth.iter().zip(&p) {
+                let d = (0..3).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max);
+                sum += (0..3).map(|k| (a[k] - b[k]).abs() as f64).sum::<f64>() / (3.0 * 255.0);
+                if d > 48.0 {
+                    bad += 1;
+                }
+            }
+            (100.0 * sum / (w * h) as f64, 100.0 * bad as f64 / (w * h) as f64, knoten(svg))
+        };
+        let t = Instant::now();
+        // Hintergrund bleibt – das Original hat ihn auch
+        let r = run_hand(&rgba, w, h, &f, HandOpts { bg_cut: false, ..HandOpts::default() });
+        let secs = t.elapsed().as_secs_f64();
+        let _ = std::fs::write(out.join(format!("{stem}-zmn.svg")), &r.svg);
+        let (fa, fe, kn) = measure(&r.svg);
+        let _ = writeln!(rep, "{stem:20} ZeichneMichNach  farbe {fa:5.2}  fehl {fe:5.2}  knoten {kn:7}  zeit {secs:5.1}");
+        let refp = f.with_extension("svg");
+        if let Ok(rs) = std::fs::read_to_string(&refp) {
+            let (fa, fe, kn) = measure(&rs);
+            let _ = writeln!(rep, "{stem:20} Referenz-SVG     farbe {fa:5.2}  fehl {fe:5.2}  knoten {kn:7}");
+        }
+    }
+    rep
+}
+
 fn png_b64(d: &[u8], w: usize, h: usize) -> String {
     let png = vector::encode_png(w, h, d);
     const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -360,6 +420,7 @@ fn main() {
     let mut kinds: Vec<&'static str> = gen::KINDS.to_vec();
     let mut vt = true;
     let mut engines_only: Option<Vec<String>> = None;
+    let mut refdir: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -377,6 +438,10 @@ fn main() {
                 engines_only = Some(args[i].split(',').map(|s| s.to_string()).collect());
             }
             "--ohne-vtracer" => vt = false,
+            "--referenzen" => {
+                i += 1;
+                refdir = Some(PathBuf::from(&args[i]));
+            }
             a => dir = PathBuf::from(a),
         }
         i += 1;
@@ -458,8 +523,16 @@ fn main() {
     }
     html += "</table><h2>Einzelbilder</h2>";
     html += &rows;
-    std::fs::write(dir.join("bericht.html"), html).unwrap();
     std::fs::write(dir.join("werte.csv"), csv).unwrap();
+    if let Some(rd) = refdir.or_else(|| Some(dir.join("referenzen")).filter(|p| p.is_dir())) {
+        let rep = referenzen(&rd, &dir.join("ergebnisse"), &db);
+        if !rep.is_empty() {
+            summary += "\nEigene Referenzbilder:\n";
+            summary += &rep;
+            html = html.replacen("<h2>Einzelbilder</h2>", &format!("<h2>Eigene Referenzbilder</h2><pre>{}</pre><h2>Einzelbilder</h2>", rep), 1);
+        }
+    }
+    std::fs::write(dir.join("bericht.html"), html).unwrap();
     std::fs::write(dir.join("zusammenfassung.txt"), &summary).unwrap();
     println!("{summary}");
     println!("-> {}", dir.join("bericht.html").display());

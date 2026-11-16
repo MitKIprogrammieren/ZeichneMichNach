@@ -113,7 +113,16 @@ fn main() {
         std::process::exit(1)
     });
     let mut d = vector::Doc::new(w, hh, img);
-    let o = vector::Opts::default();
+    let mut o = vector::Opts::default();
+    if let Some(v) = std::env::var("ZMN_RUHE").ok().and_then(|v| v.parse().ok()) {
+        o.calm = v;
+    }
+    if std::env::var_os("ZMN_OHNE_LUECKE").is_some() {
+        o.gap = false;
+    }
+    if let Some(v) = std::env::var("ZMN_RES").ok().and_then(|v| v.parse().ok()) {
+        o.res = v;
+    }
     let info = pipeline::run(&mut d, Some(&input), &o, &h, k, &|s, _| eprintln!("  {s}"));
     for m in &info.matches {
         eprintln!("  Text „{}“ → {} {} ({:.0} %)", m.text, m.family, m.styles.join("/"), m.score * 100.0);
