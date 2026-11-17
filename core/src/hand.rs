@@ -386,13 +386,121 @@ pub fn cut_background_ex(d: &mut [u8], w: usize, h: usize, tol: f64, inner: bool
             }
         }
     }
-    // Saum: Kantenpixel zwischen Hintergrund und Motiv mitnehmen,
-    // wenn sie deutlich näher an der Hintergrundfarbe liegen
-    let grown = morph_mask(&seen, w, h, 1, true);
+    // Saum entmischen: Randpixel des Motivs sind mit dem Hintergrund vermischt
+    // (Kantenglättung, Leuchten, JPEG). Je Pixel die Deckung α zwischen Hintergrund B und
+    // Motivfarbe F weiter innen schätzen: α < 0,5 → weg, sonst Farbe ohne Hintergrund-
+    // Anteil zurückrechnen. So bleibt kein dunkler (oder heller) Rand stehen.
+    let band = ((w.max(h) as f64 / 500.0).round() as usize).clamp(2, 8);
+    let dist = {
+        // Abstand zum entfernten Bereich (Schachbrett, reicht für ein schmales Band)
+        let mut dd = vec![u16::MAX; n];
+        let mut q = std::collections::VecDeque::new();
+        for p in 0..n {
+            if seen[p] {
+                dd[p] = 0;
+                q.push_back(p);
+            }
+        }
+        while let Some(p) = q.pop_front() {
+            let v = dd[p];
+            if v as usize > 2 * band + 2 {
+                continue;
+            }
+            let (x, y) = (p % w, p / w);
+            for (dx, dy) in [(-1i64, 0i64), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1), (-1, 1), (1, -1)] {
+                let (xx, yy) = (x as i64 + dx, y as i64 + dy);
+                if xx < 0 || yy < 0 || xx >= w as i64 || yy >= h as i64 {
+                    continue;
+                }
+                let r = yy as usize * w + xx as usize;
+                if dd[r] == u16::MAX {
+                    dd[r] = v + 1;
+                    q.push_back(r);
+                }
+            }
+        }
+        dd
+    };
+    let mut cut = seen.clone();
+    let src = d.to_vec();
+    let mut neu: Vec<(usize, [f64; 3])> = Vec::new();
+    for p in 0..n {
+        let dv = dist[p] as usize;
+        if seen[p] || dv == 0 || dv > band || src[p * 4 + 3] < 128 {
+            continue;
+        }
+        // Motivfarbe: Mittel der Pixel knapp hinter dem Band
+        let (x, y) = (p % w, p / w);
+        let r = 2 * band;
+        let (mut f, mut fn_) = ([0f64; 3], 0f64);
+        for yy in y.saturating_sub(r)..(y + r + 1).min(h) {
+            for xx in x.saturating_sub(r)..(x + r + 1).min(w) {
+                let q = yy * w + xx;
+                let dq = dist[q] as usize;
+                if dq > band && dq <= 2 * band + 1 && src[q * 4 + 3] >= 128 {
+                    let c = px(&src, q);
+                    for k in 0..3 {
+                        f[k] += c[k];
+                    }
+                    fn_ += 1.0;
+                }
+            }
+        }
+        let b = bg_at(&model, w, h, p);
+        let c = px(&src, p);
+        if fn_ < 1.0 {
+            // schmaler Teil ohne Inneres: nur nach Nähe zum Hintergrund entscheiden
+            if cdist(c, b) < tol * 1.6 {
+                cut[p] = true;
+            }
+            continue;
+        }
+        let f = f.map(|v| v / fn_);
+        let dir = [f[0] - b[0], f[1] - b[1], f[2] - b[2]];
+        let dd2 = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+        if dd2 < 30.0 * 30.0 {
+            // Motiv hier kaum vom Hintergrund verschieden – wie bisher
+            if cdist(c, b) < tol * 1.6 {
+                cut[p] = true;
+            }
+            continue;
+        }
+        let a = ((c[0] - b[0]) * dir[0] + (c[1] - b[1]) * dir[1] + (c[2] - b[2]) * dir[2]) / dd2;
+        if a < 0.5 {
+            cut[p] = true;
+        } else if a < 0.98 {
+            neu.push((p, [0, 1, 2].map(|k| (b[k] + (c[k] - b[k]) / a).clamp(0.0, 255.0))));
+        }
+    }
+    for (p, c) in neu {
+        for k in 0..3 {
+            d[p * 4 + k] = c[k].round() as u8;
+        }
+    }
+    // Umriss glätten: kleine Zacken und Krümel der Maske verschwinden (3×3-Mehrheit, zweimal)
+    for _ in 0..2 {
+        let prev = cut.clone();
+        for y in 1..h.saturating_sub(1) {
+            for x in 1..w.saturating_sub(1) {
+                let p = y * w + x;
+                if seen[p] {
+                    continue;
+                }
+                let mut k = 0;
+                for yy in y - 1..=y + 1 {
+                    for xx in x - 1..=x + 1 {
+                        if prev[yy * w + xx] {
+                            k += 1;
+                        }
+                    }
+                }
+                cut[p] = k >= 5;
+            }
+        }
+    }
     let mut cnt = 0usize;
     for p in 0..n {
-        let cut = seen[p] || (grown[p] && is_bg(d, p, tol * 1.6));
-        if cut {
+        if cut[p] {
             d[p * 4 + 3] = 0;
             cnt += 1;
         }
