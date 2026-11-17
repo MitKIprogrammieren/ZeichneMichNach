@@ -174,6 +174,8 @@ a{color:var(--accent)}
 <div class="card">
 <h3>Speichern</h3>
 <div class="row"><label style="white-space:nowrap">Optimieren für</label><div class="seg" id="stil" style="width:240px"><button data-v="0" class="on">Allgemein</button><button data-v="1">Gestapelt</button><button data-v="2">Schneiden</button></div></div>
+<div class="row"><label for="luecke">Lückenfüllung</label><label class="sw2"><input type="checkbox" id="luecke"><span></span></label></div>
+<div class="hint" id="lueckeHint">Dünne Konturen unter den Flächen gegen feine Linien zwischen den Farben – nur fürs Anschauen und Drucken auf Papier nötig. Aus: halb so große SVG, sauberer für 3D-Druck und Bearbeitung.</div>
 <div class="hint" id="stilHint" style="margin-bottom:8px">Allgemein: Flächen ohne Überlappung. Gestapelt: Formen liegen übereinander, nach Farbe gruppiert – leicht umzufärben. Schneiden: nur Konturen als dünne Striche (Laser, Plotter, Gravur).</div>
 <div class="dl">
 <button class="btn pri" data-f="svg" disabled>SVG</button>
@@ -257,6 +259,10 @@ function sync() {
   $('#innenRow').classList.toggle('hidden', !$('#freistellen').checked);
   $('#dueseHint').textContent = `Schmalste Stelle Standard ${String(2 * st.duese).replace('.', ',')} mm (2 × Düse), Ecken mind. ${String(st.duese / 2).replace('.', ',')} mm. Schichthöhe ${String(st.duese / 2).replace('.', ',')} mm.`;
 }
+// Lückenfüllung: Standard an, im 3D-Druck-Modus aus (eigene Wahl wird gemerkt)
+$('#luecke').checked = store.get('luecke', null) === null ? !$('#druck').checked : store.get('luecke') === '1';
+$('#luecke').addEventListener('change', e => store.set('luecke', e.target.checked ? '1' : '0'));
+$('#druck').addEventListener('change', e => { $('#luecke').checked = !e.target.checked; store.set('luecke', $('#luecke').checked ? '1' : '0') });
 for (const id of inputs) $('#' + id).addEventListener('change', e => { const el = e.target; store.set(id, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value); sync(); if (!['grund', 'hoehe', 'rand', 'grundfarbe', 'randfarbe'].includes(id)) later() });
 sync();
 
@@ -363,7 +369,7 @@ $('#slider').oninput = e => $('#cmp').style.setProperty('--x', e.target.value + 
 
 $$('.dl .btn').forEach(b => b.onclick = () => {
   if (!sid) return;
-  const p = new URLSearchParams({ id: sid, format: b.dataset.f, duese: st.duese, breite: $('#breite').value, grund: $('#grund').value, hoehe: $('#hoehe').value, rand: $('#rand').value, grundfarbe: $('#grundfarbe').value.slice(1), randfarbe: $('#randfarbe').value.slice(1) });
+  const p = new URLSearchParams({ id: sid, format: b.dataset.f, luecke: $('#luecke').checked ? '1' : '0', duese: st.duese, breite: $('#breite').value, grund: $('#grund').value, hoehe: $('#hoehe').value, rand: $('#rand').value, grundfarbe: $('#grundfarbe').value.slice(1), randfarbe: $('#randfarbe').value.slice(1) });
   location.href = '/api/speichern?' + p;
 });
 

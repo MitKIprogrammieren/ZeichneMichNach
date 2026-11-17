@@ -220,7 +220,13 @@ fn speichern(req: Request, store: &Store) {
         return fehler(req, 404, "Ergebnis nicht mehr im Speicher – bitte neu nachzeichnen");
     };
     sess.used = Instant::now();
-    let (doc, o) = (&sess.doc, &sess.o);
+    // Lückenfüllung (Kontur unter jeder Fläche): nur fürs Anschauen nötig, verdoppelt die
+    // SVG – für 3D-Druck und Weiterbearbeitung abschaltbar
+    let mut o_neu = sess.o.clone();
+    if let Some(v) = q.get("luecke") {
+        o_neu.gap = v == "1";
+    }
+    let (doc, o) = (&sess.doc, &o_neu);
     let nozzle = num(&q, "duese", 0.4).clamp(0.1, 1.2);
     let layer = (nozzle / 2.0).clamp(0.05, 0.4);
     let mut b3 = Build3d::default();
