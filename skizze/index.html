@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Skizze">
+<title>Skizze → Zeichnung</title>
+<link rel="icon" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
+<style>
+:root{
+  color-scheme:dark;
+  --primary-color:#03a9f4;--text-primary-color:#fff;
+  --primary-text-color:#e1e1e1;--secondary-text-color:#9b9b9b;
+  --card-background-color:#1c1c1c;--secondary-background-color:#2a2a2a;
+  --divider-color:rgba(225,225,225,.14);--error-color:#ef5350;--warning-color:#ffa600;
+  --mdc-icon-size:20px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;background:#111;color:var(--primary-text-color);font-family:Roboto,-apple-system,"Segoe UI",Helvetica,Arial,sans-serif;font-size:14px}
+main{max-width:1500px;margin:0 auto;padding:12px 12px calc(24px + env(safe-area-inset-bottom))}
+ha-card{display:block;background:var(--card-background-color);border-radius:12px;border:1px solid var(--divider-color)}
+ha-icon{display:inline-flex;width:var(--mdc-icon-size);height:var(--mdc-icon-size)}
+ha-icon svg{width:100%;height:100%;fill:currentColor}
+.leiste{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.leiste .platz{flex:1}
+.leiste button,.dlg button{font:inherit;font-size:14px;border:0;border-radius:10px;padding:9px 13px;cursor:pointer;background:var(--secondary-background-color);color:var(--primary-text-color);display:inline-flex;align-items:center;gap:6px}
+.leiste button.pri,.dlg button.pri{background:var(--primary-color);color:#fff;font-weight:600}
+.punkt{width:9px;height:9px;border-radius:50%;background:#4caf50;display:inline-block}
+.punkt.aus{background:var(--warning-color)}
+.hinweis{background:rgba(255,166,0,.12);border-left:3px solid var(--warning-color);padding:10px 12px;border-radius:6px;margin-bottom:10px;line-height:1.5}
+.hinweis a{color:var(--primary-color)}
+.dlg{background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:12px;padding:14px;margin-bottom:10px}
+.dlg h3{margin:0 0 8px;font-size:16px}
+.dlg p{margin:0 0 10px;color:var(--secondary-text-color);line-height:1.5}
+.dlg input{font:inherit;font-size:14px;padding:9px 10px;border-radius:8px;border:1px solid var(--divider-color);background:#111;color:var(--primary-text-color);width:100%;margin-bottom:10px}
+.dlg .zeile{display:flex;gap:8px;flex-wrap:wrap}
+.liste{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
+.liste .el{background:var(--secondary-background-color);border-radius:10px;padding:8px;display:flex;flex-direction:column;gap:6px}
+.liste img{width:100%;aspect-ratio:297/210;object-fit:contain;background:#fff;border-radius:6px}
+.liste .n{font-size:12px;word-break:break-all;color:var(--secondary-text-color)}
+.liste .zeile{display:flex;gap:6px}
+.liste .zeile a,.liste .zeile button{flex:1;justify-content:center;text-decoration:none;font-size:13px;padding:7px}
+.liste .zeile a{background:#333;color:var(--primary-text-color);border-radius:8px;display:inline-flex;align-items:center}
+.hide{display:none}
+</style>
+</head>
+<body>
+<main>
+  <div class="leiste">
+    <span class="punkt aus" id="punkt"></span><span id="ki">Gemini wird geprüft …</span>
+    <span class="platz"></span>
+    <button id="bListe"><ha-icon icon="mdi:folder-image"></ha-icon>Gespeicherte Zeichnungen</button>
+    <button id="bKey"><ha-icon icon="mdi:key-variant"></ha-icon>Gemini-Schlüssel</button>
+  </div>
+  <div class="hinweis hide" id="ohneKey">
+    Für das Lesen von Fotos braucht die App einen kostenlosen Gemini-Schlüssel aus
+    <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">Google AI Studio</a>.
+    Ohne Zahlungskonto im Projekt entstehen keine Kosten. Maße von Hand eintippen geht auch ohne.
+  </div>
+  <div class="dlg hide" id="dKey">
+    <h3>Gemini-Schlüssel</h3>
+    <p>Der Schlüssel wird nur auf dem NUC gespeichert (Ordner daten) und nie an den Browser zurückgegeben.</p>
+    <input id="iKey" type="password" autocomplete="off" placeholder="AIza…">
+    <div class="zeile"><button class="pri" id="kSave">Speichern</button><button id="kDel">Entfernen</button><button id="kZu">Schließen</button></div>
+  </div>
+  <div class="dlg hide" id="dListe">
+    <h3>Gespeicherte Zeichnungen</h3>
+    <div class="liste" id="liste"></div>
+  </div>
+  <skizze-zeichnung-card id="karte"></skizze-zeichnung-card>
+</main>
+<script>
+const ICONS = {"mdi:cog":"M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z","mdi:camera":"M4,4H7L9,2H15L17,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z","mdi:image":"M8.5,13.5L11,16.5L14.5,12L19,18H5M21,19V5C21,3.89 20.1,3 19,3H5A2,2 0 0,0 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19Z","mdi:rectangle-outline":"M4,6V19H20V6H4M18,17H6V8H18V17Z","mdi:cylinder":"M12 2C9.89 2 3 2.29 3 6V18C3 21.71 9.89 22 12 22C14.11 22 21 21.71 21 18V6C21 2.29 14.11 2 12 2M12 10C13.38 10 16.8 9.87 19 8.75V15.25C16.8 14.13 13.38 14 12 14S7.2 14.13 5 15.25V8.75C7.2 9.87 10.62 10 12 10M12 4C15.87 4 19 4.89 19 6C19 7.11 15.87 8 12 8C8.13 8 5 7.11 5 6C5 4.89 8.13 4 12 4M12 20C8.13 20 5 19.11 5 18C5 16.9 8.13 16 12 16C15.87 16 19 16.9 19 18C19 19.11 15.87 20 12 20Z","mdi:vector-polyline":"M2 3V9H4.95L6.95 15H6V21H12V16.41L17.41 11H22V5H16V9.57L10.59 15H9.06L7.06 9H8V3M4 5H6V7H4M18 7H20V9H18M8 17H10V19H8Z","mdi:cube-outline":"M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L6.04,7.5L12,10.85L17.96,7.5L12,4.15M5,15.91L11,19.29V12.58L5,9.21V15.91M19,15.91V9.21L13,12.58V19.29L19,15.91Z","mdi:refresh":"M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z","mdi:printer":"M18,3H6V7H18M19,12A1,1 0 0,1 18,11A1,1 0 0,1 19,10A1,1 0 0,1 20,11A1,1 0 0,1 19,12M16,19H8V14H16M19,8H5A3,3 0 0,0 2,11V17H6V21H18V17H22V11A3,3 0 0,0 19,8Z","mdi:download":"M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z","mdi:file-image":"M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M6,20H15L18,20V12L14,16L12,14L6,20M8,9A2,2 0 0,0 6,11A2,2 0 0,0 8,13A2,2 0 0,0 10,11A2,2 0 0,0 8,9Z","mdi:content-save":"M15,9H5V5H15M12,19A3,3 0 0,1 9,16A3,3 0 0,1 12,13A3,3 0 0,1 15,16A3,3 0 0,1 12,19M17,3H5C3.89,3 3,3.9 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V7L17,3Z","mdi:close":"M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z","mdi:plus":"M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z","mdi:swap-horizontal":"M21,9L17,5V8H10V10H17V13M7,11L3,15L7,19V16H14V14H7V11Z","mdi:key-variant":"M22,18V22H18V19H15V16H12L9.74,13.74C9.19,13.91 8.61,14 8,14A6,6 0 0,1 2,8A6,6 0 0,1 8,2A6,6 0 0,1 14,8C14,8.61 13.91,9.19 13.74,9.74L22,18M7,5A2,2 0 0,0 5,7A2,2 0 0,0 7,9A2,2 0 0,0 9,7A2,2 0 0,0 7,5Z","mdi:folder-image":"M5,17L9.5,11L13,15.5L15.5,12.5L19,17M20,6H12L10,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V8A2,2 0 0,0 20,6Z"};
+customElements.define("ha-icon", class extends HTMLElement {
+  static get observedAttributes() { return ["icon"]; }
+  connectedCallback() { this.r(); }
+  attributeChangedCallback() { this.r(); }
+  r() {
+    const d = ICONS[this.getAttribute("icon")] || "";
+    this.style.cssText = "display:inline-flex;flex:none;width:var(--mdc-icon-size,20px);height:var(--mdc-icon-size,20px)";
+    this.innerHTML = `<svg viewBox="0 0 24 24" width="100%" height="100%" fill="currentColor" aria-hidden="true"><path d="${d}"/></svg>`;
+  }
+});
+customElements.define("ha-card", class extends HTMLElement { connectedCallback() { this.style.cssText = "display:block;background:var(--card-background-color);border-radius:12px;border:1px solid var(--divider-color)"; } });
+
+const api = async (pfad, opt = {}) => {
+  const r = await fetch(pfad, opt);
+  let j = null; try { j = await r.json(); } catch (e) {}
+  if (!r.ok) throw new Error((j && j.fehler) || `Fehler ${r.status}`);
+  return j;
+};
+const post = (pfad, body) => api(pfad, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+
+// Ersatz für das hass-Objekt von Home Assistant
+const hass = {
+  states: {},
+  async callWS(m) {
+    if (m.type === "frontend/get_user_data") return api("api/einstellungen");
+    if (m.type === "frontend/set_user_data") return post("api/einstellungen", m.value);
+    if (m.type === "media_source/local_source/remove") return post("api/entfernen", { media_content_id: m.media_content_id });
+    if (m.type === "call_service" && m.domain === "ai_task") {
+      const sd = m.service_data;
+      return post("api/lesen", { entity_id: sd.entity_id, instructions: sd.instructions, media_content_id: sd.attachments[0].media_content_id });
+    }
+    throw new Error("Nicht unterstützt: " + m.type);
+  },
+  fetchWithAuth(url, opt) { return fetch(url.includes("local_source/upload") ? "api/hochladen" : url, opt); },
+};
+
+const $ = (id) => document.getElementById(id);
+async function status() {
+  const s = await api("api/status");
+  const states = {};
+  if (s.schluessel) s.modelle.forEach((m) => (states[m.id] = { attributes: { friendly_name: m.name } }));
+  hass.states = states;
+  $("punkt").classList.toggle("aus", !s.schluessel);
+  $("ki").textContent = s.schluessel ? `Gemini bereit · Standard ${s.modelle[0].name}` : "Kein Gemini-Schlüssel";
+  $("ohneKey").classList.toggle("hide", s.schluessel);
+  $("bKey").classList.toggle("hide", s.aus_umgebung);
+  $("karte").hass = hass;
+}
+$("bKey").onclick = () => { $("dKey").classList.toggle("hide"); $("iKey").focus(); };
+$("kZu").onclick = () => $("dKey").classList.add("hide");
+$("kSave").onclick = async () => {
+  try { await post("api/schluessel", { key: $("iKey").value }); $("iKey").value = ""; $("dKey").classList.add("hide"); await status(); }
+  catch (e) { alert(e.message); }
+};
+$("kDel").onclick = async () => { await post("api/schluessel", { key: "" }); await status(); };
+async function liste() {
+  const l = await api("api/zeichnungen");
+  $("liste").innerHTML = l.length ? l.map((z) => {
+    const u = "zeichnungen/" + encodeURIComponent(z.name);
+    return `<div class="el"><a href="${u}" target="_blank"><img loading="lazy" src="${u}" alt=""></a><div class="n">${z.name.replace(/</g, "&lt;")}</div>
+      <div class="zeile"><a href="${u}" download>Laden</a><button data-l="${encodeURIComponent(z.name)}">Löschen</button></div></div>`;
+  }).join("") : `<p>Noch nichts gespeichert. In der Zeichnung auf „Auf dem NUC speichern“ tippen.</p>`;
+  $("liste").querySelectorAll("[data-l]").forEach((b) => b.onclick = async () => {
+    if (!confirm("Zeichnung löschen?")) return;
+    await post("api/zeichnung_loeschen", { name: decodeURIComponent(b.dataset.l) }); liste();
+  });
+}
+$("bListe").onclick = () => { const d = $("dListe"); d.classList.toggle("hide"); if (!d.classList.contains("hide")) liste(); };
+</script>
+<script src="karte.js"></script>
+<script>
+$("karte").setConfig({});
+status().catch((e) => { $("ki").textContent = "Server nicht erreichbar: " + e.message; $("karte").hass = hass; });
+</script>
+</body>
+</html>
