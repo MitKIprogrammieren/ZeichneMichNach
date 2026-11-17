@@ -42,6 +42,12 @@ main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;padding:16p
 .cmp.v1 .res{clip-path:none}
 .cmp.v2 .orig{clip-path:none}.cmp.v2 .res{clip-path:none}
 .cmp.v1 input,.cmp.v2 input{display:none}
+.lupe{position:absolute;width:220px;height:220px;border-radius:50%;overflow:hidden;pointer-events:none;display:none;z-index:4;border:3px solid var(--accent);box-shadow:0 6px 24px rgba(0,0,0,.45);background:repeating-conic-gradient(var(--chk1) 0 25%,var(--chk2) 0 50%) 0 0/16px 16px}
+.lupe.on{display:block}
+.lupe img{position:absolute;max-width:none;max-height:none;image-rendering:auto}
+.lupe .z{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);font-size:11px;color:#fff;background:rgba(0,0,0,.55);padding:1px 7px;border-radius:6px}
+.lupe .t{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:11px;color:#fff;background:rgba(0,0,0,.55);padding:1px 7px;border-radius:6px}
+@media (hover:none){.lupe{display:none!important}}
 .tag{position:absolute;top:10px;font-size:12px;color:var(--muted);background:var(--card);padding:2px 8px;border-radius:6px;pointer-events:none}
 .tag.l{left:10px}.tag.r{right:10px}
 .busy{position:absolute;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:#fff;z-index:3}
@@ -115,6 +121,7 @@ a{color:var(--accent)}
 <span class="tag l">Original</span><span class="tag r">SVG</span>
 <div class="seg" id="ansicht" style="position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:2;background:var(--card)"><button data-v="0" class="on">Vergleich</button><button data-v="1">Vektor</button><button data-v="2">Konturen</button></div>
 </div>
+<div class="lupe" id="lupe"><img id="lupeO" alt=""><img id="lupeR" alt=""><span class="t" id="lupeT"></span><span class="z" id="lupeZ"></span></div>
 <div class="busy" id="busy"><div class="spin"></div><div id="busyT">Zeichne nach …</div></div>
 </div>
 <div class="chips" id="chips"></div>
@@ -241,6 +248,7 @@ function show() {
   // Konturen: alle Formen nur als dünne Linien über dem Original
   const svg = st.ansicht === 2 ? lastSvg.replace(/<svg([^>]*)>/, '<svg$1><style>*{fill:none!important;stroke:#22d3ee!important;stroke-width:1px!important;vector-effect:non-scaling-stroke}</style>') : lastSvg;
   $('#imgR').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  if (typeof lupeZeigen === 'function') lupeZeigen();
 }
 
 function sync() {
@@ -310,6 +318,47 @@ stage.addEventListener('dragover', e => { e.preventDefault(); $('#drop').classLi
 stage.addEventListener('dragleave', () => $('#drop').classList.remove('over'));
 stage.addEventListener('drop', e => { e.preventDefault(); $('#drop').classList.remove('over'); setFile(e.dataTransfer.files[0]) });
 addEventListener('paste', e => { const it = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/')); if (it) setFile(it.getAsFile()) });
+// Lupe: Kreis folgt der Maus über dem Bild, Mausrad ändert die Vergrößerung
+const lupe = { z: +store.get('lupe', 4), x: 0, y: 0, in: false };
+function inhalt() {
+  // tatsächlich angezeigte Bildfläche (object-fit: contain) in Bühnen-Koordinaten
+  const img = $('#imgO'), r = img.getBoundingClientRect(), sr = $('#stage').getBoundingClientRect();
+  const nw = img.naturalWidth || 1, nh = img.naturalHeight || 1;
+  const s = Math.min(r.width / nw, r.height / nh), w = nw * s, h = nh * s;
+  return { x: r.left - sr.left + (r.width - w) / 2, y: r.top - sr.top + (r.height - h) / 2, w, h };
+}
+function lupeZeigen() {
+  const L = $('#lupe');
+  if (!lupe.in || !file || !$('#imgO').naturalWidth) { L.classList.remove('on'); return }
+  const c = inhalt(), D = 220;
+  const u = (lupe.x - c.x) / c.w, v = (lupe.y - c.y) / c.h;
+  if (u < 0 || v < 0 || u > 1 || v > 1) { L.classList.remove('on'); return }
+  L.classList.add('on');
+  L.style.left = (lupe.x - D / 2) + 'px'; L.style.top = (lupe.y - D / 2) + 'px';
+  const W = c.w * lupe.z, H = c.h * lupe.z, ox = D / 2 - u * W, oy = D / 2 - v * H;
+  // welche Ebene: Vergleich → Seite des Schiebers, Vektor → SVG, Konturen → beide übereinander
+  const links = lupe.x < +$('#slider').value / 100 * $('#cmp').getBoundingClientRect().width;
+  const zeigO = st.ansicht === 2 || (st.ansicht === 0 && links), zeigR = st.ansicht !== 0 || !links;
+  for (const [id, an, src] of [['#lupeO', zeigO, $('#imgO').src], ['#lupeR', zeigR, $('#imgR').getAttribute('src') || '']]) {
+    const im = $(id);
+    im.style.display = an && src ? 'block' : 'none';
+    if (an && im.getAttribute('src') !== src) im.src = src;
+    im.style.width = W + 'px'; im.style.height = H + 'px'; im.style.left = ox + 'px'; im.style.top = oy + 'px';
+  }
+  $('#lupeT').textContent = st.ansicht === 2 ? 'Konturen' : st.ansicht === 1 ? 'SVG' : (links ? 'Original' : 'SVG');
+  $('#lupeZ').textContent = String(Math.round(lupe.z * 10) / 10).replace('.', ',') + '×';
+}
+const cmpEl = $('#cmp');
+cmpEl.addEventListener('mousemove', e => { const sr = $('#stage').getBoundingClientRect(); lupe.x = e.clientX - sr.left; lupe.y = e.clientY - sr.top; lupe.in = true; lupeZeigen() });
+cmpEl.addEventListener('mouseleave', () => { lupe.in = false; lupeZeigen() });
+cmpEl.addEventListener('wheel', e => {
+  if (!lupe.in || !$('#lupe').classList.contains('on')) return;
+  e.preventDefault();
+  lupe.z = Math.min(24, Math.max(1.5, lupe.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  store.set('lupe', lupe.z.toFixed(2));
+  lupeZeigen();
+}, { passive: false });
+$('#slider').addEventListener('input', lupeZeigen);
 $('#slider').oninput = e => $('#cmp').style.setProperty('--x', e.target.value + '%');
 
 $$('.dl .btn').forEach(b => b.onclick = () => {
