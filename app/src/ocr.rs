@@ -33,14 +33,17 @@ pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<V
     // dort nur sehr sichere Zeilen nehmen
     let busy = !nz_core::hand::is_flat(rgba, w, h);
     let min_conf = if busy { 0.85 } else { 0.6 };
-    let mut all = recognize_min(image, w, h, min_conf).unwrap_or_default();
+    // Masken je Farbe vorbereiten, dann alle Durchgänge (ganzes Bild + Masken) parallel –
+    // Tesseract rechnet je Aufruf nur auf einem Kern
+    static ZAEHLER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let lauf = ZAEHLER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut bilder: Vec<(std::path::PathBuf, bool)> = vec![(image.to_path_buf(), false)];
     let q = nz_core::vector::quantize(rgba, w, h);
     if !q.pal.is_empty() {
         // ein paar Farben mehr als automatisch – Schrift mit wenig Kontrast soll nicht
         // mit ihrem Untergrund verschmelzen
         let k = (q.auto + 2).clamp(3, 8).min(q.pal.len());
-        let groups = &q.presets[k];
-        for (gi, g) in groups.iter().enumerate() {
+        for (gi, g) in q.presets[k].iter().enumerate() {
             let mut img = vec![255u8; w * h * 4];
             let mut cnt = 0usize;
             for p in 0..w * h {
@@ -56,16 +59,30 @@ pub fn recognize_rgba(image: &Path, w: usize, h: usize, rgba: &[u8]) -> Result<V
             if cnt < 50 || cnt > w * h * 6 / 10 {
                 continue;
             }
-            let tmp = std::env::temp_dir().join(format!("zmn-ocr-{}-{gi}.png", std::process::id()));
-            if std::fs::write(&tmp, nz_core::vector::encode_png(w, h, &img)).is_err() {
-                continue;
+            let tmp = std::env::temp_dir().join(format!("zmn-ocr-{}-{lauf}-{gi}.png", std::process::id()));
+            if std::fs::write(&tmp, nz_core::vector::encode_png(w, h, &img)).is_ok() {
+                bilder.push((tmp, true));
             }
-            if let Ok(lines) = recognize_min(&tmp, w, h, min_conf) {
-                all.extend(lines);
-            }
-            let _ = std::fs::remove_file(&tmp);
         }
     }
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).max(1);
+    let naechstes = std::sync::atomic::AtomicUsize::new(0);
+    let all = std::sync::Mutex::new(Vec::new());
+    std::thread::scope(|sc| {
+        for _ in 0..threads.min(bilder.len()) {
+            sc.spawn(|| loop {
+                let i = naechstes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((pfad, temp)) = bilder.get(i) else { break };
+                if let Ok(lines) = recognize_min(pfad, w, h, min_conf) {
+                    all.lock().unwrap().extend(lines);
+                }
+                if *temp {
+                    let _ = std::fs::remove_file(pfad);
+                }
+            });
+        }
+    });
+    let mut all = all.into_inner().unwrap();
     // Tesseract liest in Formen gern einzelne Zeichen hinein („m @“ in einem Stern):
     // nur Zeilen mit mindestens zwei Buchstaben/Ziffern und überwiegend Schrift behalten
     all.retain(|l| {

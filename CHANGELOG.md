@@ -18,6 +18,7 @@
 - Kommandozeile: `--duese`, `--ecken`, `--innen`.
 
 ### Behoben
+- Texterkennung im Container deutlich schneller: die Durchgänge je Farbe laufen parallel (Silvester-/Pokal-Bilder: 8,4 s → 6,0 s auf 2 Kernen, auf dem NUC mit 8 Kernen mehr). Gleichzeitige Anfragen kommen sich bei den Zwischendateien nicht mehr in die Quere.
 - Hintergrund entfernen lief bei schwarzem (oder weißem) Hintergrund in fast gleichfarbige Teile des Motivs (schwarzer Controller, dunkler Sockel). Jetzt passt sich die Toleranz dem Rauschen des Hintergrunds an, und die Füllung stoppt an jedem Farbsprung. Der Rand wird entmischt (kein dunkler/heller Saum mehr) und geglättet.
 - Druckmodus: verbreiterte Striche wurden im zweiten Durchgang wieder zu schmal (jetzt sicher ≥ schmalste Stelle).
 - Eigene App **ZeichneMichNach** im Mesh2STEP-Look, dunkles Design als Standard, hell/dunkel/System in den Einstellungen.

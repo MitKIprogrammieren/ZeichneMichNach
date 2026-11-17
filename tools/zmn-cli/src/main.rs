@@ -123,6 +123,15 @@ fn main() {
     if let Some(v) = std::env::var("ZMN_RUHE").ok().and_then(|v| v.parse().ok()) {
         o.calm = v;
     }
+    if let Some(v) = std::env::var("ZMN_TOL").ok().and_then(|v| v.parse().ok()) {
+        o.tol = v;
+    }
+    if let Some(v) = std::env::var("ZMN_GLATT").ok().and_then(|v| v.parse().ok()) {
+        o.smooth = v;
+    }
+    if let Some(v) = std::env::var("ZMN_MINF").ok().and_then(|v| v.parse().ok()) {
+        o.min_area = v;
+    }
     if std::env::var_os("ZMN_OHNE_LUECKE").is_some() {
         o.gap = false;
     }

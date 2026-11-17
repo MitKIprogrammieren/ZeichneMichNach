@@ -3,7 +3,7 @@
 # Ausgabe wie der Mac-Helfer: [{"text","conf","x","y","w","h"}] in Pixeln, eine Zeile je Textzeile.
 set -e
 [ -n "$1" ] || { echo "Aufruf: zmn-ocr bild.png" >&2; exit 2; }
-tesseract "$1" stdout -l "${ZMN_OCR_LANG:-deu+eng}" --psm 11 tsv 2>/dev/null | awk -F'\t' '
+OMP_THREAD_LIMIT=1 tesseract "$1" stdout -l "${ZMN_OCR_LANG:-deu+eng}" --psm 11 tsv 2>/dev/null | awk -F'\t' '
 NR > 1 && $1 == 5 && $11 >= 0 {
   t = $12; gsub(/^[ \t]+|[ \t]+$/, "", t); if (t == "") next
   k = $3 "_" $4 "_" $5
