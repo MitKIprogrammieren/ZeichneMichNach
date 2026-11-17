@@ -317,6 +317,17 @@ pub fn cut_background_ex(d: &mut [u8], w: usize, h: usize, tol: f64, inner: bool
     if fits.len() * 10 < opaque.len() * 8 {
         return 0.0;
     }
+    // Toleranz an das Rauschen des Hintergrunds anpassen: ein sauberer schwarzer oder weißer
+    // Hintergrund (Rauschen klein) darf nicht in fast gleichfarbige Teile des Motivs laufen
+    // (schwarzer Controller vor schwarzem Grund)
+    let var = fits.iter().map(|&p| cdist(px(d, p), bg_at(&model, w, h, p)).powi(2)).sum::<f64>() / fits.len().max(1) as f64;
+    let tol = (4.0 * var.sqrt() + 5.0).clamp(6.0, tol);
+    // Schrittweite: zwischen zwei Nachbarn darf sich die Farbe nur wenig ändern – der
+    // Hintergrund ist ruhig, der Übergang ins Motiv dagegen ein Sprung (auch dunkel auf dunkel)
+    let step = (tol * 0.6).max(3.0);
+    if std::env::var_os("ZMN_DEBUG").is_some() {
+        eprintln!("    Hintergrund: Rauschen {:.1}, Toleranz {tol:.1}, Schritt {step:.1}", var.sqrt());
+    }
     let is_bg = |d: &[u8], p: usize, t: f64| d[p * 4 + 3] < 128 || cdist(px(d, p), bg_at(&model, w, h, p)) < t;
     let mut seen = vec![false; n];
     let mut stack: Vec<usize> = fits;
@@ -332,7 +343,7 @@ pub fn cut_background_ex(d: &mut [u8], w: usize, h: usize, tol: f64, inner: bool
             if y + 1 < h { Some(p + w) } else { None },
         ];
         for q in nb.into_iter().flatten() {
-            if !seen[q] && is_bg(d, q, tol) {
+            if !seen[q] && is_bg(d, q, tol) && (d[q * 4 + 3] < 128 || cdist(px(d, q), px(d, p)) < step) {
                 seen[q] = true;
                 stack.push(q);
             }
