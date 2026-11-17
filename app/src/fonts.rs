@@ -385,6 +385,11 @@ fn best_groups(nc: usize, na: usize, chars_alnum: &dyn Fn(usize) -> bool, val: &
 const INTER: [(&[u8], &str); 2] = [(include_bytes!("../assets/Inter-Regular.otf"), "Regular"), (include_bytes!("../assets/Inter-SemiBold.otf"), "SemiBold")];
 
 /// Passende Schrift für alle Zeilen suchen und Umrisse erzeugen.
+/// Mindest-Trefferwert einer Schrift für die ganze Zeile
+const MIN_TREFFER: f64 = 0.75;
+/// Mindest-Trefferwert für jeden einzelnen Buchstaben bzw. jede Buchstabengruppe
+const MIN_BUCHSTABE: f64 = 0.55;
+
 pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextOut>, Vec<Match>) {
     // Masken verkleinern
     let segs: Vec<Vec<(Vec<bool>, usize, usize)>> = lines.iter().map(|l| l.segs.iter().map(|s| shrink(&s.mask, s.mw, s.mh, 56)).collect()).collect();
@@ -522,7 +527,7 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
             hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
         });
         // je Familie: jede Gruppe darf den besten Schnitt nehmen (fett + dünn in einer Zeile)
-        let mut best: Option<(f64, String, Vec<Grp>)> = None;
+        let mut best: Option<(f64, String, Vec<Grp>, f64)> = None;
         for fam in &fams {
             let members: Vec<&(usize, std::collections::HashMap<Grp, f64>)> = evald.iter().filter(|e| &cands[e.0].family == fam).collect();
             let val = |g: &Grp| -> Option<f64> { members.iter().filter_map(|e| e.1.get(g).copied()).fold(None, |m, v| Some(m.map_or(v, |m: f64| m.max(v)))) };
@@ -530,12 +535,23 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
             if debug {
                 eprintln!("      {fam}: {:.2} {:?}", v, grp.iter().map(|g| (l.chars[g.0..g.1].iter().collect::<String>(), (val(g).unwrap_or(0.0) * 100.0).round())).collect::<Vec<_>>());
             }
+            // schwächster Buchstabe: ein einziger falscher Buchstabe verdirbt den ganzen Schriftzug
+            let schwach = grp
+                .iter()
+                .filter(|g| l.chars[g.0..g.1].iter().any(|c| c.is_alphanumeric()))
+                .map(|g| val(g).unwrap_or(0.0))
+                .fold(1.0f64, f64::min);
             if best.as_ref().map(|b| v > b.0).unwrap_or(true) {
-                best = Some((v, fam.clone(), grp));
+                best = Some((v, fam.clone(), grp, schwach));
             }
         }
-        let Some((val, fam, grp)) = best else { continue };
-        if val < 0.5 {
+        let Some((val, fam, grp, schwach)) = best else { continue };
+        // Nur ersetzen, wenn die Schrift wirklich passt (echte Treffer liegen bei 0,85–1,0).
+        // Eine ähnliche, aber falsche Schrift sieht schlechter aus als die nachgezeichnete Fläche.
+        if val < MIN_TREFFER || schwach < MIN_BUCHSTABE {
+            if debug {
+                eprintln!("      verworfen: {fam} {val:.2} (schwächster Buchstabe {schwach:.2})");
+            }
             continue; // nichts passt gut genug – lieber als Fläche nachzeichnen
         }
         // Schriftbänder: aufeinanderfolgende Großbuchstaben/Ziffern gleicher Höhe bilden
