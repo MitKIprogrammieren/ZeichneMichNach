@@ -15,6 +15,7 @@ pub mod relief;
 pub mod inspect;
 pub mod io;
 pub mod json;
+pub mod ki;
 pub mod math;
 pub mod mesh;
 pub mod orient;

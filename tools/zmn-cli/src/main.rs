@@ -1,5 +1,5 @@
 //! zmn – ZeichneMichNach auf der Kommandozeile.
-//! zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund]
+//! zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--innen] [--druck mm] [--duese 0.4] [--ecken mm]
 #[path = "../../../app/src/fonts.rs"]
 mod fonts;
 #[path = "../../../app/src/ocr.rs"]
@@ -72,6 +72,23 @@ fn main() {
                 i += 1;
                 h.print_colors = args[i].parse().unwrap_or(4);
             }
+            "--duese" => {
+                i += 1;
+                let nz: f64 = args[i].replace(',', ".").parse().unwrap_or(0.4);
+                h.print_min_mm = 2.0 * nz;
+                h.print_round_mm = nz / 2.0;
+            }
+            "--ecken" => {
+                i += 1;
+                h.print_round_mm = args[i].replace(',', ".").parse().unwrap_or(0.2);
+            }
+            "--innen" => h.bg_inner = true,
+            "--illustration" => h.kind = 2,
+            "--logo" => h.kind = 1,
+            "--vereinfachen" => {
+                i += 1;
+                h.simplify = args[i].parse().unwrap_or(1);
+            }
             "--min" => {
                 i += 1;
                 h.print_min_mm = args[i].replace(',', ".").parse().unwrap_or(0.8);
@@ -94,7 +111,7 @@ fn main() {
         i += 1;
     }
     let Some(input) = input else {
-        eprintln!("Aufruf: zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--druck breite_mm] [--farben n] [--min mm] [--grund mm] [--rand mm] [--hoehe mm]  (Ausgabe .svg .png .step .3mf)");
+        eprintln!("Aufruf: zmn <bild.png> [-o ausgabe.svg] [-k farben] [--ohne text,linien,foto,verlauf,hintergrund] [--innen] [--druck breite_mm] [--duese 0.2|0.4] [--farben n] [--min mm] [--ecken mm] [--grund mm] [--rand mm] [--hoehe mm]  (Ausgabe .svg .png .step .3mf)");
         std::process::exit(2);
     };
     let (w, hh, img) = vector::decode_png(&std::fs::read(&input).expect("Bild lesen")).unwrap_or_else(|e| {
@@ -102,7 +119,25 @@ fn main() {
         std::process::exit(1)
     });
     let mut d = vector::Doc::new(w, hh, img);
-    let o = vector::Opts::default();
+    let mut o = vector::Opts::default();
+    if let Some(v) = std::env::var("ZMN_RUHE").ok().and_then(|v| v.parse().ok()) {
+        o.calm = v;
+    }
+    if let Some(v) = std::env::var("ZMN_TOL").ok().and_then(|v| v.parse().ok()) {
+        o.tol = v;
+    }
+    if let Some(v) = std::env::var("ZMN_GLATT").ok().and_then(|v| v.parse().ok()) {
+        o.smooth = v;
+    }
+    if let Some(v) = std::env::var("ZMN_MINF").ok().and_then(|v| v.parse().ok()) {
+        o.min_area = v;
+    }
+    if std::env::var_os("ZMN_OHNE_LUECKE").is_some() {
+        o.gap = false;
+    }
+    if let Some(v) = std::env::var("ZMN_RES").ok().and_then(|v| v.parse().ok()) {
+        o.res = v;
+    }
     let info = pipeline::run(&mut d, Some(&input), &o, &h, k, &|s, _| eprintln!("  {s}"));
     for m in &info.matches {
         eprintln!("  Text „{}“ → {} {} ({:.0} %)", m.text, m.family, m.styles.join("/"), m.score * 100.0);

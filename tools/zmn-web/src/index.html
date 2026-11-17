@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ZeichneMichNach</title>
+<link rel="icon" href="/icon.png">
+<link rel="apple-touch-icon" href="/icon.png">
+<meta name="theme-color" content="#1c1d20">
+<style>
+:root{--top:#1c1d20;--bg:#26282c;--panel:#2d2e33;--card:#34353a;--card2:#3e4046;--line:#46484e;--text:#e6e7ea;--muted:#a2a5ac;--faint:#787c83;--accent:#5c70f6;--ok:#4ade80;--warn:#fbbf24;--err:#f87171;--chk1:#3a3b40;--chk2:#2d2e33}
+:root.hell{--top:#2b2f33;--bg:#ecedf0;--panel:#fff;--card:#fff;--card2:#f4f4f5;--line:#e2e3e7;--text:#262e30;--muted:#6b7280;--faint:#9ca3af;--ok:#009639;--warn:#c46e00;--err:#d63031;--chk1:#e5e7eb;--chk2:#fff}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+body{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+header{background:var(--top);color:#e6e7ea;display:flex;align-items:center;gap:10px;padding:10px 16px;position:sticky;top:0;z-index:5}
+header img{width:26px;height:26px;border-radius:7px}
+header b{font-weight:600}
+header .sp{flex:1}
+button{font:inherit;color:inherit;cursor:pointer}
+.icon{background:none;border:0;color:#a2a5ac;padding:6px;border-radius:8px;font-size:18px;line-height:1}
+.icon:hover{background:rgba(255,255,255,.08);color:#fff}
+main{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:16px;padding:16px;max-width:1500px;margin:0 auto}
+@media (max-width:900px){main{grid-template-columns:minmax(0,1fr);padding:12px}}
+.card{background:var(--card);border-radius:12px;padding:12px 14px}
+.stage{background:var(--panel);border-radius:12px;position:relative;overflow:hidden;min-height:340px;display:flex;align-items:center;justify-content:center}
+@media (min-width:901px){.stage{height:calc(100vh - 150px);min-height:420px}}
+.drop{display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--muted);text-align:center;padding:40px 20px;border:2px dashed var(--line);border-radius:12px;margin:16px;cursor:pointer;width:calc(100% - 32px)}
+.drop.over{border-color:var(--accent);color:var(--text)}
+.drop .big{font-size:40px;line-height:1}
+.cmp{position:absolute;inset:0;display:none}
+.cmp.on{display:block}
+.cmp .layer{position:absolute;inset:12px;display:flex;align-items:center;justify-content:center}
+.cmp img{max-width:100%;max-height:100%;object-fit:contain}
+.chk{background:repeating-conic-gradient(var(--chk1) 0 25%,var(--chk2) 0 50%) 0 0/16px 16px}
+.cmp .orig{clip-path:inset(0 calc(100% - var(--x)) 0 0)}
+.cmp .res{clip-path:inset(0 0 0 var(--x))}
+.cmp .bar{position:absolute;top:0;bottom:0;left:var(--x);width:2px;background:var(--accent);transform:translateX(-1px);pointer-events:none}
+.cmp .knob{position:absolute;top:50%;left:var(--x);width:28px;height:28px;border-radius:50%;background:var(--accent);transform:translate(-50%,-50%);pointer-events:none;box-shadow:0 0 0 3px rgba(0,0,0,.25)}
+.cmp input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:ew-resize;margin:0}
+.cmp.v1 .orig,.cmp.v1 .bar,.cmp.v1 .knob,.cmp.v1 .tag,.cmp.v2 .bar,.cmp.v2 .knob,.cmp.v2 .tag{display:none}
+.cmp.v1 .res{clip-path:none}
+.cmp.v2 .orig{clip-path:none}.cmp.v2 .res{clip-path:none}
+.cmp.v1 input,.cmp.v2 input{display:none}
+.lupe{position:absolute;width:220px;height:220px;border-radius:50%;overflow:hidden;pointer-events:none;display:none;z-index:4;border:3px solid var(--accent);box-shadow:0 6px 24px rgba(0,0,0,.45);background:repeating-conic-gradient(var(--chk1) 0 25%,var(--chk2) 0 50%) 0 0/16px 16px}
+.lupe.on{display:block}
+.lupe img{position:absolute;max-width:none;max-height:none;image-rendering:auto}
+.lupe .z{position:absolute;bottom:14px;left:50%;transform:translateX(-50%);font-size:11px;color:#fff;background:rgba(0,0,0,.55);padding:1px 7px;border-radius:6px}
+.lupe .t{position:absolute;top:14px;left:50%;transform:translateX(-50%);font-size:11px;color:#fff;background:rgba(0,0,0,.55);padding:1px 7px;border-radius:6px}
+@media (hover:none){.lupe{display:none!important}}
+.tag{position:absolute;top:10px;font-size:12px;color:var(--muted);background:var(--card);padding:2px 8px;border-radius:6px;pointer-events:none}
+.tag.l{left:10px}.tag.r{right:10px}
+.busy{position:absolute;inset:0;background:rgba(0,0,0,.35);display:none;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:#fff;z-index:3}
+.busy.on{display:flex}
+.spin{width:34px;height:34px;border:3px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:s 0.8s linear infinite}
+@keyframes s{to{transform:rotate(360deg)}}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.chip{background:var(--card);color:var(--muted);font-size:12px;padding:3px 9px;border-radius:7px;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.sw{width:12px;height:12px;border-radius:3px;border:1px solid rgba(128,128,128,.45)}
+.side{display:flex;flex-direction:column;gap:10px}
+h3{margin:0 0 8px;font-size:12px;font-weight:600;color:var(--muted);text-transform:none;letter-spacing:.02em}
+.row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0}
+.row label{flex:1}
+.row label.sw2{flex:none}
+.hint{font-size:12px;color:var(--faint);margin:2px 0 6px}
+.sw2{position:relative;width:38px;height:22px;flex:none}
+.sw2 input{opacity:0;width:0;height:0}
+.sw2 span{position:absolute;inset:0;background:var(--card2);border-radius:11px;transition:.15s;border:1px solid var(--line)}
+.sw2 span:before{content:"";position:absolute;width:16px;height:16px;left:2px;top:2px;background:#fff;border-radius:50%;transition:.15s}
+.sw2 input:checked+span{background:var(--accent);border-color:var(--accent)}
+.sw2 input:checked+span:before{transform:translateX(16px)}
+.seg{display:flex;background:var(--bg);border-radius:8px;padding:3px;gap:2px}
+.seg button{flex:1;white-space:nowrap;border:0;background:none;padding:6px 8px;border-radius:6px;color:var(--muted);font-size:13px}
+.seg button.on{background:var(--accent);color:#fff}
+.num{width:92px;display:flex;align-items:center;background:var(--bg);border-radius:8px;border:1px solid var(--line)}
+.num input{width:100%;background:none;border:0;color:var(--text);font:inherit;padding:6px 8px;text-align:right;outline:none}
+.num span{color:var(--faint);padding-right:8px;font-size:12px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.grid2 .lab{font-size:12px;color:var(--muted);margin-bottom:3px}
+.grid2 .num{width:100%}
+details>summary{cursor:pointer;color:var(--muted);font-size:13px;list-style:none;padding:4px 0}
+details>summary::-webkit-details-marker{display:none}
+details>summary:before{content:"›";display:inline-block;margin-right:6px;transition:.15s}
+details[open]>summary:before{transform:rotate(90deg)}
+.dl{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.btn{border:0;background:var(--card2);color:var(--text);padding:9px 6px;border-radius:8px;font-size:13px}
+.btn:hover{filter:brightness(1.1)}
+.btn.pri{background:var(--accent);color:#fff;grid-column:span 2}
+.btn:disabled{opacity:.45;cursor:default}
+.note{font-size:12.5px;color:var(--warn);margin-top:8px}
+.err{color:var(--err)}
+.texts div{display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0;border-bottom:1px solid var(--line)}
+.texts div:last-child{border:0}
+.texts small{color:var(--muted)}
+.modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:flex-start;justify-content:center;padding:60px 14px;z-index:10;overflow:auto}
+.modal.on{display:flex}
+.modal .card{width:100%;max-width:520px;background:var(--panel)}
+pre{font-size:11px;background:var(--bg);padding:8px;border-radius:8px;overflow:auto;max-height:260px;margin:8px 0 0}
+a{color:var(--accent)}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<header>
+<img src="/icon.png" alt="">
+<b>ZeichneMichNach</b>
+<span class="sp"></span>
+<button class="icon" id="neu" title="Neues Bild" aria-label="Neues Bild">＋</button>
+<button class="icon" id="einst" title="Einstellungen" aria-label="Einstellungen">⚙︎</button>
+</header>
+<main>
+<section>
+<div class="stage" id="stage">
+<div class="drop" id="drop"><div class="big">⬚</div><div><b>Bild hierher ziehen</b><br>oder antippen zum Auswählen – auch Einfügen (⌘V) geht</div><div class="hint">PNG, JPG, WebP, GIF, BMP · Logos, Wappen, Fotos</div></div>
+<div class="cmp" id="cmp" style="--x:50%">
+<div class="layer chk"></div>
+<div class="layer orig"><img id="imgO" alt="Original"></div>
+<div class="layer res"><img id="imgR" alt="Ergebnis"></div>
+<div class="bar"></div><div class="knob"></div>
+<input type="range" id="slider" min="0" max="100" value="50" aria-label="Vergleich Original und SVG">
+<span class="tag l">Original</span><span class="tag r">SVG</span>
+<div class="seg" id="ansicht" style="position:absolute;left:50%;bottom:10px;transform:translateX(-50%);z-index:2;background:var(--card)"><button data-v="0" class="on">Vergleich</button><button data-v="1">Vektor</button><button data-v="2">Konturen</button></div>
+</div>
+<div class="lupe" id="lupe"><img id="lupeO" alt=""><img id="lupeR" alt=""><span class="t" id="lupeT"></span><span class="z" id="lupeZ"></span></div>
+<div class="busy" id="busy"><div class="spin"></div><div id="busyT">Zeichne nach …</div></div>
+</div>
+<div class="chips" id="chips"></div>
+<div class="note hidden" id="note"></div>
+</section>
+<aside class="side">
+<div class="card">
+<h3>Bild</h3>
+<div class="row"><label>Bildart</label><div class="seg" id="bildart" style="width:250px"><button data-v="0" class="on">Auto</button><button data-v="1">Logo</button><button data-v="2">Illustration</button></div></div>
+<div class="row" id="vereinfRow"><label>Vereinfachen</label><div class="seg" id="vereinfachen" style="width:250px"><button data-v="0" class="on">Aus</button><button data-v="1">Mittel</button><button data-v="2">Stark</button></div></div>
+<div class="hint" id="bildartHint">Logo: wenige saubere Farben, Linien und Text. Illustration: viele Farbflächen mit Schattierung, wie bei gezeichneten Figuren – die Kanten-KI trennt echte Kanten von Schattierung. Vereinfachen legt Schattierungsstufen zu ruhigen Flächen zusammen (flacher, plakativer Look).</div>
+<div class="row" style="margin-top:6px"><label>Farben</label>
+<div class="seg" style="width:150px"><button data-k="auto" class="on">Auto</button><button data-k="zahl">Zahl</button></div></div>
+<div class="row hidden" id="kRow"><label>Anzahl</label><div class="num"><input id="k" type="number" min="1" max="32" value="4" inputmode="numeric"></div></div>
+</div>
+<div class="card">
+<h3>Nachzeichnen wie von Hand</h3>
+<div class="row"><label for="freistellen">Hintergrund entfernen</label><label class="sw2"><input type="checkbox" id="freistellen" checked><span></span></label></div>
+<div class="hint">Ruhiger Hintergrund am Rand – auch mit Verlauf oder Vignette – wird transparent.</div>
+<div class="row" id="innenRow"><label for="innen">Auch Innenflächen (z. B. in „O“)</label><label class="sw2"><input type="checkbox" id="innen"><span></span></label></div>
+<div class="row"><label for="text">Text erkennen &amp; ersetzen</label><label class="sw2"><input type="checkbox" id="text" checked><span></span></label></div>
+<div class="row"><label for="linien">Feine Linien als Striche</label><label class="sw2"><input type="checkbox" id="linien" checked><span></span></label></div>
+<div class="row"><label for="foto">Fotobereiche beruhigen</label><label class="sw2"><input type="checkbox" id="foto" checked><span></span></label></div>
+<div class="row"><label for="verlauf">Farbverläufe erkennen</label><label class="sw2"><input type="checkbox" id="verlauf" checked><span></span></label></div>
+</div>
+<div class="card">
+<div class="row"><label for="druck"><b>Für den 3D-Druck</b></label><label class="sw2"><input type="checkbox" id="druck"><span></span></label></div>
+<div id="druckBox" class="hidden">
+<div class="row"><label>Düse</label><div class="seg" id="duese" style="width:200px"><button data-v="0.2">0,2</button><button data-v="0.4" class="on">0,4</button><button data-v="0.6">0,6</button><button data-v="0.8">0,8</button></div></div>
+<div class="grid2" style="margin-top:6px">
+<div><div class="lab">Breite</div><div class="num"><input id="breite" type="number" value="80" step="1" inputmode="decimal"><span>mm</span></div></div>
+<div><div class="lab">Farben (AMS)</div><div class="num"><input id="farbenDruck" type="number" value="4" min="1" max="16" inputmode="numeric"></div></div>
+<div><div class="lab">Schmalste Stelle</div><div class="num"><input id="min" type="number" value="0.8" step="0.05" inputmode="decimal"><span>mm</span></div></div>
+<div><div class="lab">Ecken abrunden</div><div class="num"><input id="ecken" type="number" value="0.2" step="0.05" inputmode="decimal"><span>mm</span></div></div>
+</div>
+<div class="hint" id="dueseHint">Schmalste Stelle = 2 × Düse, Ecken mindestens halbe Düse. Schichthöhe 0,2 mm.</div>
+<div class="row"><label>Fotobereiche</label><div class="seg" id="fotob" style="width:230px"><button data-v="0" class="on">Eine Farbe</button><button data-v="1">Stufen</button><button data-v="2">Lassen</button></div></div>
+<details style="margin-top:4px"><summary>Grundschicht, Rand und Höhen (STEP/3MF)</summary>
+<div class="grid2" style="margin-top:6px">
+<div><div class="lab">Grundschicht</div><div class="num"><input id="grund" type="number" value="1.6" step="0.1" inputmode="decimal"><span>mm</span></div></div>
+<div><div class="lab">Höhe der Farben</div><div class="num"><input id="hoehe" type="number" value="0.6" step="0.1" inputmode="decimal"><span>mm</span></div></div>
+<div><div class="lab">Rand (Breite)</div><div class="num"><input id="rand" type="number" value="1.0" step="0.1" inputmode="decimal"><span>mm</span></div></div>
+<div><div class="lab">Farbe Grund / Rand</div><div style="display:flex;gap:6px"><input id="grundfarbe" type="color" value="#1e1e1e" style="width:50%;height:32px;border:0;background:none"><input id="randfarbe" type="color" value="#f0f0f0" style="width:50%;height:32px;border:0;background:none"></div></div>
+</div>
+<div class="hint">Höhen werden auf die Schichthöhe der Düse gerundet; 0 schaltet Grundschicht bzw. Rand aus.</div>
+</details>
+</div>
+</div>
+<div class="card hidden" id="textCard"><h3>Erkannter Text</h3><div class="texts" id="texts"></div></div>
+<div class="card">
+<h3>Speichern</h3>
+<div class="row"><label style="white-space:nowrap">Optimieren für</label><div class="seg" id="stil" style="width:240px"><button data-v="0" class="on">Allgemein</button><button data-v="1">Gestapelt</button><button data-v="2">Schneiden</button></div></div>
+<div class="row"><label for="luecke">Lückenfüllung</label><label class="sw2"><input type="checkbox" id="luecke"><span></span></label></div>
+<div class="hint" id="lueckeHint">Dünne Konturen unter den Flächen gegen feine Linien zwischen den Farben – nur fürs Anschauen und Drucken auf Papier nötig. Aus: halb so große SVG, sauberer für 3D-Druck und Bearbeitung.</div>
+<div class="hint" id="stilHint" style="margin-bottom:8px">Allgemein: Flächen ohne Überlappung. Gestapelt: Formen liegen übereinander, nach Farbe gruppiert – leicht umzufärben. Schneiden: nur Konturen als dünne Striche (Laser, Plotter, Gravur).</div>
+<div class="dl">
+<button class="btn pri" data-f="svg" disabled>SVG</button>
+<button class="btn" data-f="png" disabled>PNG</button>
+<button class="btn" data-f="pdf" disabled>PDF</button>
+<button class="btn" data-f="dxf" disabled>DXF</button>
+<button class="btn" data-f="eps" disabled>EPS</button>
+<button class="btn" data-f="step" disabled>STEP</button>
+<button class="btn" data-f="3mf" disabled>3MF</button>
+</div>
+</div>
+</aside>
+</main>
+<input type="file" id="file" accept="image/*" class="hidden">
+<div class="modal" id="modal"><div class="card">
+<div class="row"><b style="font-size:16px">Einstellungen</b><button class="icon" id="zu" aria-label="Schließen" style="color:var(--muted)">✕</button></div>
+<div class="row"><label>Darstellung</label><div class="seg" id="theme" style="width:230px"><button data-v="dunkel">Dunkel</button><button data-v="hell">Hell</button><button data-v="system">System</button></div></div>
+<div class="hint">Umschalten auch mit ⇧⌘D.</div>
+<hr style="border:0;border-top:1px solid var(--line);margin:12px 0">
+<b>Prüfstand</b>
+<div class="hint">Erzeugt Testbilder mit bekanntem Original (Logos, Wappen, Text, Linien, Verläufe, Freisteller – jeweils sauber, klein und als JPEG), zeichnet sie nach und misst die Abweichung, auch im Druckmodus für 0,4er und 0,2er Düse. VTracer läuft als Vergleichsmaßstab mit.</div>
+<div class="row"><label>Bilder je Art</label><div class="num"><input id="pAnz" type="number" value="2" min="1" max="10"></div></div>
+<div style="display:flex;gap:8px;margin-top:6px"><button class="btn pri" id="pStart" style="flex:1">Prüfstand starten</button><a class="btn hidden" id="pLink" href="/pruefstand" target="_blank" style="flex:1;text-align:center;text-decoration:none">Bericht öffnen</a></div>
+<div class="hint" id="pStat"></div>
+<details style="margin-top:8px" id="refBox"><summary>Eigene Referenzbilder</summary>
+<div class="hint">Deine Originale (PNG, JPG, WebP) – mehrere auf einmal, ein ganzer Ordner oder eine ZIP. Optional eine selbst gezeichnete SVG mit gleichem Namen (z. B. <i>pokal3.jpg</i> + <i>pokal3.svg</i>), die mit verglichen wird. Beim nächsten Prüfstand wird alles mitgemessen.</div>
+<div class="drop" id="refDrop" style="margin:6px 0;width:100%;padding:18px 10px"><div><b>Dateien oder Ordner hierher ziehen</b></div><div class="hint" style="margin:0">oder auswählen:</div>
+<div style="display:flex;gap:6px"><button class="btn" id="refDateien" type="button">Dateien</button><button class="btn" id="refOrdner" type="button">Ordner</button></div></div>
+<input type="file" id="refIn" multiple accept="image/*,.svg,image/svg+xml,.zip,application/zip" class="hidden">
+<input type="file" id="refDir" webkitdirectory directory multiple class="hidden">
+<div class="hint" id="rStat"></div>
+<div class="texts" id="refListe"></div>
+<button class="btn hidden" id="refAlle" style="width:100%;margin-top:6px">Alle Referenzbilder löschen</button>
+</details>
+<pre class="hidden" id="pZus"></pre>
+<div class="hint" id="ver"></div>
+</div></div>
+<script>
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+let file = null, sid = null, origUrl = null, timer = null, running = 0;
+const st = { k: 'auto', duese: 0.4, fotob: 0, bildart: 0, stil: 0, ansicht: 0, vereinfachen: 0 };
+let lastSvg = '';
+const store = { get(k, d) { try { return localStorage.getItem('zmn.' + k) ?? d } catch { return d } }, set(k, v) { try { localStorage.setItem('zmn.' + k, v) } catch {} } };
+
+function applyTheme(v) {
+  store.set('theme', v);
+  const dark = v === 'dunkel' || (v === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.classList.toggle('hell', !dark);
+  $$('#theme button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
+}
+applyTheme(store.get('theme', 'dunkel'));
+$$('#theme button').forEach(b => b.onclick = () => applyTheme(b.dataset.v));
+addEventListener('keydown', e => { if (e.shiftKey && (e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'd') { e.preventDefault(); applyTheme(document.documentElement.classList.contains('hell') ? 'dunkel' : 'hell') } });
+
+// gespeicherte Eingaben wiederherstellen
+const inputs = ['k', 'freistellen', 'innen', 'text', 'linien', 'foto', 'verlauf', 'druck', 'breite', 'farbenDruck', 'min', 'ecken', 'grund', 'hoehe', 'rand', 'grundfarbe', 'randfarbe'];
+for (const id of inputs) { const el = $('#' + id), v = store.get(id, null); if (v !== null) { if (el.type === 'checkbox') el.checked = v === '1'; else el.value = v } }
+st.k = store.get('kmode', 'auto'); st.duese = +store.get('duese', 0.4); st.fotob = +store.get('fotob', 0); st.bildart = +store.get('bildart', 0); st.stil = +store.get('stil', 0); st.vereinfachen = +store.get('vereinfachen', 0);
+
+function seg(sel, key, cb) {
+  $$(sel + ' button').forEach(b => {
+    b.classList.toggle('on', String(b.dataset.v ?? b.dataset.k) === String(st[key]));
+    b.onclick = () => { st[key] = b.dataset.v !== undefined ? +b.dataset.v : b.dataset.k; store.set(key === 'k' ? 'kmode' : key, st[key]); $$(sel + ' button').forEach(x => x.classList.toggle('on', x === b)); cb && cb(); later() };
+  });
+}
+$$('.seg button[data-k]').forEach(b => b.closest('.seg').id || (b.closest('.seg').id = 'kseg'));
+seg('#kseg', 'k', sync); seg('#duese', 'duese', () => { $('#min').value = (2 * st.duese).toFixed(2); $('#ecken').value = (st.duese / 2).toFixed(2); store.set('min', $('#min').value); store.set('ecken', $('#ecken').value); sync() }); seg('#fotob', 'fotob'); seg('#bildart', 'bildart'); seg('#vereinfachen', 'vereinfachen'); seg('#stil', 'stil');
+$$('#ansicht button').forEach(b => b.onclick = () => { st.ansicht = +b.dataset.v; $$('#ansicht button').forEach(x => x.classList.toggle('on', x === b)); show() });
+function show() {
+  const c = $('#cmp'); c.classList.toggle('v1', st.ansicht === 1); c.classList.toggle('v2', st.ansicht === 2);
+  if (!lastSvg) return;
+  // Konturen: alle Formen nur als dünne Linien über dem Original
+  const svg = st.ansicht === 2 ? lastSvg.replace(/<svg([^>]*)>/, '<svg$1><style>*{fill:none!important;stroke:#22d3ee!important;stroke-width:1px!important;vector-effect:non-scaling-stroke}</style>') : lastSvg;
+  $('#imgR').src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(svg);
+  if (typeof lupeZeigen === 'function') lupeZeigen();
+}
+
+function sync() {
+  $('#kRow').classList.toggle('hidden', st.k !== 'zahl');
+  $('#druckBox').classList.toggle('hidden', !$('#druck').checked);
+  $('#innenRow').classList.toggle('hidden', !$('#freistellen').checked);
+  $('#dueseHint').textContent = `Schmalste Stelle Standard ${String(2 * st.duese).replace('.', ',')} mm (2 × Düse), Ecken mind. ${String(st.duese / 2).replace('.', ',')} mm. Schichthöhe ${String(st.duese / 2).replace('.', ',')} mm.`;
+}
+// Lückenfüllung: Standard an, im 3D-Druck-Modus aus (eigene Wahl wird gemerkt)
+$('#luecke').checked = store.get('luecke', null) === null ? !$('#druck').checked : store.get('luecke') === '1';
+$('#luecke').addEventListener('change', e => store.set('luecke', e.target.checked ? '1' : '0'));
+$('#druck').addEventListener('change', e => { $('#luecke').checked = !e.target.checked; store.set('luecke', $('#luecke').checked ? '1' : '0') });
+for (const id of inputs) $('#' + id).addEventListener('change', e => { const el = e.target; store.set(id, el.type === 'checkbox' ? (el.checked ? '1' : '0') : el.value); sync(); if (!['grund', 'hoehe', 'rand', 'grundfarbe', 'randfarbe'].includes(id)) later() });
+sync();
+
+function params() {
+  const p = new URLSearchParams();
+  p.set('farben', st.k === 'zahl' ? $('#k').value : '0');
+  for (const id of ['freistellen', 'innen', 'text', 'linien', 'foto', 'verlauf', 'druck']) p.set(id, $('#' + id).checked ? '1' : '0');
+  p.set('duese', st.duese); p.set('breite', $('#breite').value); p.set('farben_druck', $('#farbenDruck').value);
+  p.set('min', $('#min').value); p.set('ecken', $('#ecken').value); p.set('fotobereiche', st.fotob);
+  p.set('bildart', st.bildart); p.set('stil', st.stil); p.set('vereinfachen', st.vereinfachen);
+  if (file) p.set('name', file.name || 'bild');
+  return p;
+}
+function later() { if (!file) return; clearTimeout(timer); timer = setTimeout(run, 350) }
+
+async function run() {
+  if (!file) return;
+  const my = ++running;
+  $('#busy').classList.add('on'); $('#busyT').textContent = $('#text').checked ? 'Erkenne Text und zeichne nach …' : 'Zeichne nach …';
+  try {
+    const r = await fetch('/api/nachzeichnen?' + params(), { method: 'POST', body: file });
+    const j = await r.json();
+    if (my !== running) return;
+    if (!r.ok) throw new Error(j.fehler || r.statusText);
+    sid = j.id;
+    lastSvg = j.svg; show();
+    const chips = [`${j.farben.length} Farben`, `${j.formen} Formen`, `${j.knoten} Knoten`];
+    if (j.linien) chips.push(`${j.linien} Linien`); if (j.verlaeufe) chips.push(`${j.verlaeufe} Verläufe`);
+    if (j.freigestellt) chips.push('Hintergrund entfernt');
+    chips.unshift(j.bildart + (j.ki ? ' · Kanten-KI' : ''));
+    chips.push(`${j.sekunden.toFixed(1).replace('.', ',')} s`);
+    const many = j.farben.length > 12;
+    $('#chips').innerHTML = (many ? `<span class="chip">${j.farben.map(c => `<span class="sw" title="${c}" style="background:${c}"></span>`).join('')}</span>` : j.farben.map(c => `<span class="chip"><span class="sw" style="background:${c}"></span>${c}</span>`).join('')) + chips.map(c => `<span class="chip">${c}</span>`).join('');
+    $('#note').classList.toggle('hidden', !j.hinweis); $('#note').classList.remove('err'); $('#note').textContent = j.hinweis || '';
+    $('#textCard').classList.toggle('hidden', !j.texte.length);
+    $('#texts').innerHTML = j.texte.map(t => `<div><span>„${esc(t.text)}“</span><small>${esc(t.schrift)} ${esc(t.schnitt)} · ${Math.round(t.treffer * 100)} %</small></div>`).join('');
+    $$('.dl .btn').forEach(b => b.disabled = false);
+  } catch (e) {
+    if (my !== running) return;
+    $('#note').classList.remove('hidden'); $('#note').classList.add('err'); $('#note').textContent = 'Fehler: ' + e.message;
+  } finally { if (my === running) $('#busy').classList.remove('on') }
+}
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+function setFile(f) {
+  if (!f || !f.type.startsWith('image/')) return;
+  file = f; sid = null;
+  if (origUrl) URL.revokeObjectURL(origUrl);
+  origUrl = URL.createObjectURL(f); $('#imgO').src = origUrl; $('#imgR').removeAttribute('src');
+  $('#drop').classList.add('hidden'); $('#cmp').classList.add('on');
+  $$('.dl .btn').forEach(b => b.disabled = true);
+  run();
+}
+$('#drop').onclick = () => $('#file').click();
+$('#neu').onclick = () => $('#file').click();
+$('#file').onchange = e => setFile(e.target.files[0]);
+const stage = $('#stage');
+stage.addEventListener('dragover', e => { e.preventDefault(); $('#drop').classList.add('over') });
+stage.addEventListener('dragleave', () => $('#drop').classList.remove('over'));
+stage.addEventListener('drop', e => { e.preventDefault(); $('#drop').classList.remove('over'); setFile(e.dataTransfer.files[0]) });
+addEventListener('paste', e => { const it = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/')); if (it) setFile(it.getAsFile()) });
+// Lupe: Kreis folgt der Maus über dem Bild, Mausrad ändert die Vergrößerung
+const lupe = { z: +store.get('lupe', 4), x: 0, y: 0, in: false };
+function inhalt() {
+  // tatsächlich angezeigte Bildfläche (object-fit: contain) in Bühnen-Koordinaten
+  const img = $('#imgO'), r = img.getBoundingClientRect(), sr = $('#stage').getBoundingClientRect();
+  const nw = img.naturalWidth || 1, nh = img.naturalHeight || 1;
+  const s = Math.min(r.width / nw, r.height / nh), w = nw * s, h = nh * s;
+  return { x: r.left - sr.left + (r.width - w) / 2, y: r.top - sr.top + (r.height - h) / 2, w, h };
+}
+function lupeZeigen() {
+  const L = $('#lupe');
+  if (!lupe.in || !file || !$('#imgO').naturalWidth) { L.classList.remove('on'); return }
+  const c = inhalt(), D = 220;
+  const u = (lupe.x - c.x) / c.w, v = (lupe.y - c.y) / c.h;
+  if (u < 0 || v < 0 || u > 1 || v > 1) { L.classList.remove('on'); return }
+  L.classList.add('on');
+  L.style.left = (lupe.x - D / 2) + 'px'; L.style.top = (lupe.y - D / 2) + 'px';
+  const W = c.w * lupe.z, H = c.h * lupe.z, ox = D / 2 - u * W, oy = D / 2 - v * H;
+  // welche Ebene: Vergleich → Seite des Schiebers, Vektor → SVG, Konturen → beide übereinander
+  const links = lupe.x < +$('#slider').value / 100 * $('#cmp').getBoundingClientRect().width;
+  const zeigO = st.ansicht === 2 || (st.ansicht === 0 && links), zeigR = st.ansicht !== 0 || !links;
+  for (const [id, an, src] of [['#lupeO', zeigO, $('#imgO').src], ['#lupeR', zeigR, $('#imgR').getAttribute('src') || '']]) {
+    const im = $(id);
+    im.style.display = an && src ? 'block' : 'none';
+    if (an && im.getAttribute('src') !== src) im.src = src;
+    im.style.width = W + 'px'; im.style.height = H + 'px'; im.style.left = ox + 'px'; im.style.top = oy + 'px';
+  }
+  $('#lupeT').textContent = st.ansicht === 2 ? 'Konturen' : st.ansicht === 1 ? 'SVG' : (links ? 'Original' : 'SVG');
+  $('#lupeZ').textContent = String(Math.round(lupe.z * 10) / 10).replace('.', ',') + '×';
+}
+const cmpEl = $('#cmp');
+cmpEl.addEventListener('mousemove', e => { const sr = $('#stage').getBoundingClientRect(); lupe.x = e.clientX - sr.left; lupe.y = e.clientY - sr.top; lupe.in = true; lupeZeigen() });
+cmpEl.addEventListener('mouseleave', () => { lupe.in = false; lupeZeigen() });
+cmpEl.addEventListener('wheel', e => {
+  if (!lupe.in || !$('#lupe').classList.contains('on')) return;
+  e.preventDefault();
+  lupe.z = Math.min(24, Math.max(1.5, lupe.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+  store.set('lupe', lupe.z.toFixed(2));
+  lupeZeigen();
+}, { passive: false });
+$('#slider').addEventListener('input', lupeZeigen);
+$('#slider').oninput = e => $('#cmp').style.setProperty('--x', e.target.value + '%');
+
+$$('.dl .btn').forEach(b => b.onclick = () => {
+  if (!sid) return;
+  const p = new URLSearchParams({ id: sid, format: b.dataset.f, luecke: $('#luecke').checked ? '1' : '0', duese: st.duese, breite: $('#breite').value, grund: $('#grund').value, hoehe: $('#hoehe').value, rand: $('#rand').value, grundfarbe: $('#grundfarbe').value.slice(1), randfarbe: $('#randfarbe').value.slice(1) });
+  location.href = '/api/speichern?' + p;
+});
+
+// Einstellungen und Prüfstand
+$('#einst').onclick = () => { $('#modal').classList.add('on'); status(); refs() };
+$('#zu').onclick = () => $('#modal').classList.remove('on');
+$('#modal').onclick = e => { if (e.target.id === 'modal') $('#modal').classList.remove('on') };
+let pt = null;
+async function status() {
+  try {
+    const j = await (await fetch('/api/status')).json();
+    $('#ver').textContent = `Version ${j.version} · Texterkennung ${j.texterkennung ? 'aktiv (Tesseract)' : 'nicht installiert'}`;
+    $('#pStart').disabled = !j.pruefstand || j.pruefstand_laeuft;
+    $('#pStart').textContent = j.pruefstand_laeuft ? `Läuft … ${j.pruefstand_sekunden} s` : 'Prüfstand starten';
+    $('#pLink').classList.toggle('hidden', !j.bericht);
+    $('#pStat').textContent = j.pruefstand ? (j.pruefstand_laeuft ? 'Das dauert je nach Anzahl ein paar Minuten.' : '') : 'Prüfstand ist in diesem Container nicht enthalten.';
+    $('#pZus').classList.toggle('hidden', !j.zusammenfassung); $('#pZus').textContent = j.zusammenfassung;
+    clearTimeout(pt); if (j.pruefstand_laeuft && $('#modal').classList.contains('on')) pt = setTimeout(status, 2000);
+  } catch {}
+}
+async function refs() {
+  try {
+    const l = await (await fetch('/api/referenzen')).json();
+    $('#refListe').innerHTML = l.map(f => `<div><span>${esc(f)}</span><button class="icon" style="color:var(--muted);font-size:14px" data-del="${esc(f)}" aria-label="${esc(f)} löschen">✕</button></div>`).join('');
+    $$('#refListe [data-del]').forEach(b => b.onclick = async () => { await fetch('/api/referenz?datei=' + encodeURIComponent(b.dataset.del), { method: 'DELETE' }); refs() });
+    $('#refAlle').classList.toggle('hidden', l.length < 2);
+    const bilder = l.filter(f => !f.endsWith('.svg')).length;
+    $('#rStat').textContent = l.length ? `${bilder} Bilder, ${l.length - bilder} SVGs im Prüfstand` : 'Noch keine eigenen Referenzbilder.';
+  } catch {}
+}
+const erlaubt = f => /\.(png|jpe?g|webp|svg|zip)$/i.test(f.name) && !f.name.startsWith('.');
+async function hochladen(files) {
+  files = [...files].filter(erlaubt);
+  if (!files.length) { $('#rStat').textContent = 'Keine passenden Dateien (PNG, JPG, WebP, SVG oder ZIP).'; return }
+  let ok = 0, fehl = 0;
+  for (const [i, f] of files.entries()) {
+    $('#rStat').textContent = `Lade hoch … ${i + 1} / ${files.length}: ${f.name}`;
+    try {
+      const r = await fetch('/api/referenz?name=' + encodeURIComponent(f.name), { method: 'POST', body: f });
+      const j = await r.json();
+      if (r.ok) ok += j.dateien.length; else fehl++;
+    } catch { fehl++ }
+  }
+  await refs();
+  $('#rStat').textContent += ` – ${ok} Dateien hochgeladen` + (fehl ? `, ${fehl} fehlgeschlagen` : '');
+}
+// Ordner beim Hineinziehen rekursiv einlesen
+async function eintraege(items) {
+  const out = [];
+  const lesen = async e => {
+    if (!e) return;
+    if (e.isFile) out.push(await new Promise((res, rej) => e.file(res, rej)));
+    else if (e.isDirectory) {
+      const r = e.createReader();
+      let batch;
+      do { batch = await new Promise((res, rej) => r.readEntries(res, rej)); for (const x of batch) await lesen(x) } while (batch.length);
+    }
+  };
+  for (const it of items) await lesen(it.webkitGetAsEntry ? it.webkitGetAsEntry() : null);
+  return out;
+}
+$('#refDateien').onclick = e => { e.stopPropagation(); $('#refIn').click() };
+$('#refOrdner').onclick = e => { e.stopPropagation(); $('#refDir').click() };
+$('#refIn').onchange = e => { hochladen(e.target.files); e.target.value = '' };
+$('#refDir').onchange = e => { hochladen(e.target.files); e.target.value = '' };
+const rd = $('#refDrop');
+rd.addEventListener('dragover', e => { e.preventDefault(); rd.classList.add('over') });
+rd.addEventListener('dragleave', () => rd.classList.remove('over'));
+rd.addEventListener('drop', async e => {
+  e.preventDefault(); e.stopPropagation(); rd.classList.remove('over');
+  const items = [...(e.dataTransfer.items || [])];
+  const files = items.length && items[0].webkitGetAsEntry ? await eintraege(items) : [...e.dataTransfer.files];
+  hochladen(files);
+});
+$('#refAlle').onclick = async () => { if (confirm('Alle eigenen Referenzbilder löschen?')) { await fetch('/api/referenz?alle=1', { method: 'DELETE' }); refs() } };
+$('#pStart').onclick = async () => { await fetch('/api/pruefstand?anzahl=' + $('#pAnz').value, { method: 'POST' }); status() };
+</script>
+</body>
+</html>

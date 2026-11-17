@@ -39,6 +39,8 @@ pub struct Group {
     /// vom Nutzer gesetzte Farbe
     pub over: Option<[u8; 3]>,
     pub transp: bool,
+    /// Farbe von Hand gewählt – nicht automatisch entmischen
+    pub fixed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -240,7 +242,7 @@ impl Doc {
         }
         let k = k.clamp(1, self.q.pal.len());
         self.k = k;
-        self.groups = self.q.presets[k].iter().map(|m| Group { src: m.clone(), over: None, transp: false }).collect();
+        self.groups = self.q.presets[k].iter().map(|m| Group { src: m.clone(), over: None, transp: false, fixed: false }).collect();
         let cnt = &self.q.cnt;
         let gw = |g: &Group| g.src.iter().map(|&i| cnt.get(i).copied().unwrap_or(0)).sum::<usize>();
         self.groups.sort_by(|a, b| gw(b).cmp(&gw(a)));
@@ -327,6 +329,214 @@ impl Doc {
             }
         }
         self.g = gm;
+        self.unmix_thin();
+    }
+
+    /// Dünne Farben entmischen. Feine Linien und Ränder bestehen im Bild nur aus
+    /// Mischpixeln (Kantenglättung, Verkleinerung, JPEG): ihre Gruppe bekommt dann eine
+    /// blasse Mischfarbe und wird zu breit. Für jede Gruppe ohne Inneres wird die echte
+    /// Farbe aus Untergrund B und Mischfarbe P zurückgerechnet (P = B + α·(L − B),
+    /// verlängert bis an den Farbraumrand, höchstens 3-fach) und die Grenzpixel werden
+    /// nach ihrer Deckung α ≥ 0,5 neu verteilt – so sitzt die Kante wie im Original.
+    pub fn unmix_thin(&mut self) {
+        let (w, h) = (self.w, self.h);
+        let n = w * h;
+        if self.g.len() != n || n == 0 || self.data.len() != n * 4 || self.groups.len() < 2 {
+            return;
+        }
+        let g = &self.g;
+        // Abstand zur nächsten fremden Gruppe (Chamfer)
+        let mut d = vec![1e6f32; n];
+        for y in 0..h {
+            for x in 0..w {
+                let p = y * w + x;
+                let a = g[p];
+                if (x > 0 && g[p - 1] != a) || (x + 1 < w && g[p + 1] != a) || (y > 0 && g[p - w] != a) || (y + 1 < h && g[p + w] != a) {
+                    d[p] = 0.5;
+                }
+            }
+        }
+        for y in 0..h {
+            for x in 0..w {
+                let p = y * w + x;
+                if x > 0 {
+                    d[p] = d[p].min(d[p - 1] + 1.0);
+                }
+                if y > 0 {
+                    d[p] = d[p].min(d[p - w] + 1.0);
+                }
+            }
+        }
+        for y in (0..h).rev() {
+            for x in (0..w).rev() {
+                let p = y * w + x;
+                if x + 1 < w {
+                    d[p] = d[p].min(d[p + 1] + 1.0);
+                }
+                if y + 1 < h {
+                    d[p] = d[p].min(d[p + w] + 1.0);
+                }
+            }
+        }
+        let ng = self.groups.len();
+        let sc = self.sc.max(1.0) as f32;
+        let mut total = vec![0usize; ng];
+        let mut inner = vec![0usize; ng];
+        let mut nb = vec![std::collections::HashMap::<i16, usize>::new(); ng];
+        for y in 0..h {
+            for x in 0..w {
+                let p = y * w + x;
+                let a = g[p];
+                if a < 0 {
+                    continue;
+                }
+                let a = a as usize;
+                total[a] += 1;
+                if d[p] > 1.6 * sc {
+                    inner[a] += 1;
+                }
+                if x + 1 < w && g[p + 1] != g[p] {
+                    *nb[a].entry(g[p + 1]).or_insert(0) += 1;
+                }
+                if y + 1 < h && g[p + w] != g[p] {
+                    *nb[a].entry(g[p + w]).or_insert(0) += 1;
+                }
+                if x > 0 && g[p - 1] != g[p] {
+                    *nb[a].entry(g[p - 1]).or_insert(0) += 1;
+                }
+                if y > 0 && g[p - w] != g[p] {
+                    *nb[a].entry(g[p - w]).or_insert(0) += 1;
+                }
+            }
+        }
+        if std::env::var_os("ZMN_DEBUG").is_some() {
+            for gi in 0..ng {
+                eprintln!("    Entmischen: Gruppe {gi} {} gesamt {} innen {} over {:?} transp {}", hex(self.gcol(gi)), total[gi], inner[gi], self.groups[gi].over, self.groups[gi].transp);
+            }
+        }
+        let px = |p: usize| [self.data[p * 4] as f64, self.data[p * 4 + 1] as f64, self.data[p * 4 + 2] as f64];
+        let mut jobs: Vec<(usize, usize, [f64; 3], [f64; 3])> = Vec::new();
+        for gi in 0..ng {
+            if self.groups[gi].transp || self.groups[gi].fixed || total[gi] < (20.0 * sc * sc) as usize {
+                continue;
+            }
+            if inner[gi] as f64 > 0.08 * total[gi] as f64 {
+                continue;
+            }
+            let Some((&bg, &cnt)) = nb[gi].iter().max_by_key(|e| *e.1) else { continue };
+            let all: usize = nb[gi].values().sum();
+            if bg < 0 || (cnt as f64) < 0.6 * all as f64 || self.groups[bg as usize].transp {
+                continue;
+            }
+            let bg = bg as usize;
+            // Untergrund muss selbst eine echte Fläche sein
+            if inner[bg] < total[bg] / 3 {
+                continue;
+            }
+            let pc = self.gcol(gi).map(|v| v as f64);
+            let b = self.gcol(bg).map(|v| v as f64);
+            let dir = [pc[0] - b[0], pc[1] - b[1], pc[2] - b[2]];
+            let dl = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            if dl < 40.0 {
+                continue;
+            }
+            let mut t = 3.0f64;
+            for k in 0..3 {
+                if dir[k] < -1e-6 {
+                    t = t.min(b[k] / -dir[k]);
+                } else if dir[k] > 1e-6 {
+                    t = t.min((255.0 - b[k]) / dir[k]);
+                }
+            }
+            if t < 1.08 {
+                continue;
+            }
+            let l = [0, 1, 2].map(|k| (b[k] + t * dir[k]).clamp(0.0, 255.0));
+            jobs.push((gi, bg, b, l));
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        let mut g2 = self.g.clone();
+        let reach = 2.0 * sc;
+        for &(gi, bg, b, l) in &jobs {
+            let dir = [l[0] - b[0], l[1] - b[1], l[2] - b[2]];
+            let dd = dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2];
+            // Schwelle so wählen, dass die Fläche der Farbe der aufsummierten Deckung
+            // entspricht („Tinte bleibt erhalten“) – bei Linien schmaler als ein Pixel
+            // wäre α ≥ 0,5 nirgends erreicht und die Linie zerfiele
+            let mut als: Vec<f64> = (0..n)
+                .filter(|&p| (self.g[p] == gi as i16 || self.g[p] == bg as i16) && d[p] <= reach)
+                .map(|p| {
+                    let c = px(p);
+                    (((c[0] - b[0]) * dir[0] + (c[1] - b[1]) * dir[1] + (c[2] - b[2]) * dir[2]) / dd).clamp(0.0, 1.0)
+                })
+                .collect();
+            let ink: f64 = als.iter().filter(|&&a| a > 0.08).sum();
+            als.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+            let k = (ink.round() as usize).min(als.len().saturating_sub(1));
+            let thr = als.get(k).copied().unwrap_or(0.5).clamp(0.12, 0.5);
+            let mut amap = vec![-1f32; n];
+            for p in 0..n {
+                let a = self.g[p];
+                if (a != gi as i16 && a != bg as i16) || d[p] > reach {
+                    continue;
+                }
+                let c = px(p);
+                amap[p] = (((c[0] - b[0]) * dir[0] + (c[1] - b[1]) * dir[1] + (c[2] - b[2]) * dir[2]) / dd) as f32;
+            }
+            let thr = thr as f32;
+            // Deckung leicht weichzeichnen: Rauschen und Treppen der Hochrechnung
+            // verschwinden, die Kante wird eine glatte Höhenlinie
+            let br = ((self.sc * 0.5).round() as usize).max(1);
+            if self.sc > 1.5 {
+                for _ in 0..2 {
+                    let src = amap.clone();
+                    for y in 0..h {
+                        for x in 0..w {
+                            let p = y * w + x;
+                            if src[p] < 0.0 {
+                                continue;
+                            }
+                            let (mut s, mut c) = (0f32, 0f32);
+                            for yy in y.saturating_sub(br)..(y + br + 1).min(h) {
+                                for xx in x.saturating_sub(br)..(x + br + 1).min(w) {
+                                    let v = src[yy * w + xx];
+                                    if v >= 0.0 {
+                                        s += v;
+                                        c += 1.0;
+                                    }
+                                }
+                            }
+                            amap[p] = s / c;
+                        }
+                    }
+                }
+            }
+            for y in 1..h.saturating_sub(1) {
+                for x in 1..w.saturating_sub(1) {
+                    let p = y * w + x;
+                    let al = amap[p];
+                    if al < 0.0 && self.g[p] != gi as i16 {
+                        continue;
+                    }
+                    // Grat: höher als beide Nachbarn in einer Richtung → gehört zur Linie
+                    // (hält Linien zusammen, die schmaler sind als ein Pixel)
+                    let ridge = al >= 0.15 && self.g[p] == gi as i16
+                        && [(1usize, 1usize), (w, w), (w + 1, w + 1), (w - 1, w - 1)].iter().any(|&(o1, o2)| {
+                            let (a1, a2) = (amap[p - o1], amap[p + o2]);
+                            al >= a1 && al >= a2 && (al > a1 || al > a2)
+                        });
+                    if al >= thr || ridge {
+                        g2[p] = gi as i16;
+                    } else if self.g[p] == gi as i16 {
+                        g2[p] = bg as i16;
+                    }
+                }
+            }
+            self.groups[gi].over = Some(l.map(|v| v.round() as u8));
+        }
+        self.g = g2;
     }
 
     /// Stufe 3: Konturen verfolgen und Kurven anpassen.

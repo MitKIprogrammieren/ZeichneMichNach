@@ -1,0 +1,19 @@
+[package]
+name = "zmn-ki"
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+description = "Trainingsdaten für die Kanten-KI von ZeichneMichNach (Bilder mit bekannten echten Kanten)"
+
+[workspace]
+
+[[bin]]
+name = "zmn-ki"
+path = "src/main.rs"
+
+[dependencies]
+resvg = "0.45"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = 3
