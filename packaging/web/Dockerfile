@@ -11,6 +11,13 @@ COPY tools/zmn-pruefstand tools/zmn-pruefstand
 RUN cd tools/zmn-web && cargo build --release \
  && cd ../zmn-pruefstand && cargo build --release
 
+# Schriftpaket: ~190 freie Logo-Schriften von Google Fonts (SIL Open Font License),
+# damit erkannter Text öfter mit der echten Schrift statt als Fläche gesetzt wird
+FROM debian:bookworm-slim AS schriften
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY tools/schriften /schriften-werkzeug
+RUN /schriften-werkzeug/laden.sh /schriften
+
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tesseract-ocr tesseract-ocr-deu tesseract-ocr-eng \
@@ -20,6 +27,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=bau /src/tools/zmn-web/target/release/zmn-web /app/zmn-web
 COPY --from=bau /src/tools/zmn-pruefstand/target/release/zmn-pruefstand /app/zmn-pruefstand
 COPY packaging/linux/zmn-ocr /app/zmn-ocr
+COPY --from=schriften /schriften /usr/share/fonts/google
 RUN chmod +x /app/zmn-ocr && mkdir -p /daten/schriften
 # eigene Schriften (z. B. die vom Mac) einfach nach /daten/schriften legen
 ENV ZMN_DATEN=/daten ZMN_PORT=8094 ZMN_FONTS=/usr/share/fonts:/daten/schriften TZ=Europe/Berlin

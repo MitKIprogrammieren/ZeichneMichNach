@@ -92,6 +92,77 @@ fn glyph_run(face: &ttf_parser::Face, text: &str) -> Option<Glyph> {
     Some(Glyph { cmds, bb: [x0, y0, x1, y1] })
 }
 
+/// Umriss schräg stellen (s = Versatz je Höheneinheit, positiv = nach rechts geneigt).
+fn schraeg(g: Option<Glyph>, s: f32) -> Option<Glyph> {
+    let g = g?;
+    if s == 0.0 {
+        return Some(g);
+    }
+    let (mut x0, mut x1) = (f32::MAX, f32::MIN);
+    let cmds: Vec<(char, [f32; 6])> = g
+        .cmds
+        .into_iter()
+        .map(|(c, mut v)| {
+            let n = match c {
+                'M' | 'L' => 1,
+                'Q' => 2,
+                'C' => 3,
+                _ => 0,
+            };
+            for k in 0..n {
+                v[2 * k] += s * v[2 * k + 1];
+                x0 = x0.min(v[2 * k]);
+                x1 = x1.max(v[2 * k]);
+            }
+            (c, v)
+        })
+        .collect();
+    if x1 <= x0 {
+        return None;
+    }
+    Some(Glyph { cmds, bb: [x0, g.bb[1], x1, g.bb[3]] })
+}
+
+/// Neigung einer Textzeile schätzen: die Scherung, bei der die senkrechten Striche
+/// am schärfsten übereinanderliegen. 0, wenn die Schrift (fast) aufrecht ist.
+fn neigung(l: &TextAnalysis) -> f32 {
+    let (w, h) = (l.lw, l.lh);
+    if w < 8 || h < 8 {
+        return 0.0;
+    }
+    let schaerfe = |s: f64| -> f64 {
+        let rand = (s.abs() * h as f64).ceil() as usize + 1;
+        let mut col = vec![0f64; w + 2 * rand];
+        for y in 0..h {
+            let dx = s * (h - 1 - y) as f64;
+            for x in 0..w {
+                if l.lmask[y * w + x] {
+                    let xs = (x as f64 - dx).round() as i64 + rand as i64;
+                    if xs >= 0 && (xs as usize) < col.len() {
+                        col[xs as usize] += 1.0;
+                    }
+                }
+            }
+        }
+        col.iter().map(|c| c * c).sum()
+    };
+    let null = schaerfe(0.0);
+    let mut best = (null, 0.0);
+    let mut s = -0.35;
+    while s <= 0.351 {
+        let v = schaerfe(s);
+        if v > best.0 {
+            best = (v, s);
+        }
+        s += 0.025;
+    }
+    if best.1.abs() < 0.05 || best.0 < null * 1.05 {
+        0.0
+    } else {
+        best.1 as f32
+    }
+}
+
 /// Umriss auf ein Zielrechteck abbilden (x0,y0 oben links; Breite, Höhe) – y wird gespiegelt.
 fn map_pt(g: &Glyph, x: f32, y: f32, r: [f64; 4]) -> Pt {
     let sx = r[2] / (g.bb[2] - g.bb[0]).max(1e-3) as f64;
@@ -255,6 +326,40 @@ pub fn font_files() -> Vec<PathBuf> {
     out
 }
 
+const WGHT: ttf_parser::Tag = ttf_parser::Tag::from_bytes(b"wght");
+
+/// Schrift laden, bei variablen Schriften auf die gewünschte Stärke gestellt.
+fn face_at(data: &[u8], idx: u32, wght: Option<f32>) -> Option<ttf_parser::Face<'_>> {
+    let mut f = ttf_parser::Face::parse(data, idx).ok()?;
+    if let Some(w) = wght {
+        f.set_variation(WGHT, w);
+    }
+    Some(f)
+}
+
+/// Stärken, die bei einer variablen Schrift geprüft werden (dünn bis sehr fett).
+fn wght_stufen(face: &ttf_parser::Face) -> Vec<Option<f32>> {
+    let Some(ax) = face.variation_axes().into_iter().find(|a| a.tag == WGHT) else { return vec![None] };
+    let mut v: Vec<f32> = [ax.min_value, 400.0, 600.0, 800.0, ax.max_value].iter().map(|w| w.clamp(ax.min_value, ax.max_value)).collect();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.dedup_by(|a, b| (*a - *b).abs() < 60.0);
+    v.into_iter().map(Some).collect()
+}
+
+fn stil_name(w: f32) -> &'static str {
+    match w.round() as i32 {
+        ..=150 => "Thin",
+        151..=250 => "ExtraLight",
+        251..=350 => "Light",
+        351..=450 => "Regular",
+        451..=550 => "Medium",
+        551..=650 => "SemiBold",
+        651..=750 => "Bold",
+        751..=850 => "ExtraBold",
+        _ => "Black",
+    }
+}
+
 fn name_of(face: &ttf_parser::Face, id: u16) -> Option<String> {
     face.names().into_iter().filter(|n| n.name_id == id && n.is_unicode()).find_map(|n| n.to_string())
 }
@@ -264,6 +369,8 @@ struct Cand {
     style: String,
     /// Herkunft: Datei und Index (None = eingebautes Inter, Index in INTER)
     src: (Option<PathBuf>, u32),
+    /// Stärke bei variablen Schriften (wght-Achse), sonst None
+    wght: Option<f32>,
     /// je Abschnitt: (Wert, Umriss)
     per: Vec<(f64, Option<Glyph>)>,
 }
@@ -302,14 +409,14 @@ const MAXA: usize = 6; // Bausteine je Gruppe
 type Grp = (usize, usize, usize, usize);
 
 /// Werte aller möglichen Gruppen für eine Schrift.
-fn group_values(face: &ttf_parser::Face, l: &TextAnalysis, pieces: &std::collections::HashMap<(usize, usize), Piece>) -> std::collections::HashMap<Grp, f64> {
+fn group_values(face: &ttf_parser::Face, l: &TextAnalysis, s: f32, pieces: &std::collections::HashMap<(usize, usize), Piece>) -> std::collections::HashMap<Grp, f64> {
     let chars = &l.chars;
     let (nc, na) = (chars.len(), l.atoms.len());
     let mut vals = std::collections::HashMap::new();
     for a in 0..nc {
         for i in a + 1..=(a + MAXC).min(nc) {
             let g = if i - a == 1 { glyph(face, chars[a]) } else { glyph_run(face, &chars[a..i].iter().collect::<String>()) };
-            let Some(g) = g else { continue };
+            let Some(g) = schraeg(g, s) else { continue };
             // Bausteine grob passend zur Lage in der Zeile (spart Rechenzeit)
             let (fa, fi) = (a as f64 / nc as f64, i as f64 / nc as f64);
             for b in 0..na {
@@ -389,17 +496,26 @@ const INTER: [(&[u8], &str); 2] = [(include_bytes!("../assets/Inter-Regular.otf"
 const MIN_TREFFER: f64 = 0.75;
 /// Mindest-Trefferwert für jeden einzelnen Buchstaben bzw. jede Buchstabengruppe
 const MIN_BUCHSTABE: f64 = 0.55;
+/// Mindest-Deckung des fertig gesetzten Schriftzugs mit der Tinte im Bild
+const MIN_DECKUNG: f64 = 0.9;
 
 pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextOut>, Vec<Match>) {
     // Masken verkleinern
     let segs: Vec<Vec<(Vec<bool>, usize, usize)>> = lines.iter().map(|l| l.segs.iter().map(|s| shrink(&s.mask, s.mw, s.mh, 56)).collect()).collect();
     let mut cands: Vec<Cand> = Vec::new();
-    let eval_face = |face: &ttf_parser::Face, family: String, style: String, src: (Option<PathBuf>, u32), cands: &mut Vec<Cand>| {
+    // schräge Schrift: aufrechte Schriften für den Vergleich passend neigen
+    let neig: Vec<f32> = lines.iter().map(neigung).collect();
+    if std::env::var_os("ZMN_DEBUG").is_some() {
+        for (l, s) in lines.iter().zip(&neig) {
+            eprintln!("    Neigung „{}“: {s:.3}", l.line.text);
+        }
+    }
+    let eval_face = |face: &ttf_parser::Face, family: String, style: String, src: (Option<PathBuf>, u32), wght: Option<f32>, cands: &mut Vec<Cand>| {
         let mut per = Vec::new();
         let mut any = false;
         for (li, l) in lines.iter().enumerate() {
             for (si, s) in l.segs.iter().enumerate() {
-                let g = if s.chars.chars().count() == 1 { s.chars.chars().next().and_then(|c| glyph(face, c)) } else { glyph_run(face, &s.chars) };
+                let g = schraeg(if s.chars.chars().count() == 1 { s.chars.chars().next().and_then(|c| glyph(face, c)) } else { glyph_run(face, &s.chars) }, neig[li]);
                 let v = match &g {
                     Some(g) => {
                         let (m, mw, mh) = &segs[li][si];
@@ -414,12 +530,12 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
             }
         }
         if any {
-            cands.push(Cand { family, style, src, per });
+            cands.push(Cand { family, style, src, wght, per });
         }
     };
     for (i, (data, style)) in INTER.iter().enumerate() {
         if let Ok(f) = ttf_parser::Face::parse(data, 0) {
-            eval_face(&f, "Inter".into(), style.to_string(), (None, i as u32), &mut cands);
+            eval_face(&f, "Inter".into(), style.to_string(), (None, i as u32), None, &mut cands);
         }
     }
     let files = font_files();
@@ -439,10 +555,15 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
                             let Ok(face) = ttf_parser::Face::parse(&data, idx) else { continue };
                             let family = name_of(&face, 16).or_else(|| name_of(&face, 1)).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default());
                             let style = name_of(&face, 17).or_else(|| name_of(&face, 2)).unwrap_or_else(|| "Regular".into());
-                            if face.is_italic() || style.to_lowercase().contains("italic") || style.to_lowercase().contains("oblique") {
-                                continue;
+                            let kursiv = face.is_italic() || style.to_lowercase().contains("italic") || style.to_lowercase().contains("oblique");
+                            for w in wght_stufen(&face) {
+                                let Some(fw) = face_at(&data, idx, w) else { continue };
+                                let st = match w {
+                                    Some(w) => format!("{}{}", stil_name(w), if kursiv { " Italic" } else { "" }),
+                                    None => style.clone(),
+                                };
+                                eval_face(&fw, family.clone(), st, (Some(p.clone()), idx), w, &mut local);
                             }
-                            eval_face(&face, family, style, (Some(p.clone()), idx), &mut local);
                         }
                     }
                     local
@@ -505,7 +626,7 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
         let evald: Vec<(usize, std::collections::HashMap<Grp, f64>)> = std::thread::scope(|sc| {
             let hs: Vec<_> = (0..threads)
                 .map(|t| {
-                    let (todo, cands, pieces) = (&todo, &cands, &pieces);
+                    let (todo, cands, pieces, neig) = (&todo, &cands, &pieces, &neig);
                     sc.spawn(move || {
                         let mut out = Vec::new();
                         for &ci in todo.iter().skip(t).step_by(threads) {
@@ -517,8 +638,8 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
                                 },
                                 None => std::borrow::Cow::Borrowed(INTER[c.src.1 as usize].0),
                             };
-                            let Ok(face) = ttf_parser::Face::parse(&data, if c.src.0.is_some() { c.src.1 } else { 0 }) else { continue };
-                            out.push((ci, group_values(&face, l, pieces)));
+                            let Some(face) = face_at(&data, if c.src.0.is_some() { c.src.1 } else { 0 }, c.wght) else { continue };
+                            out.push((ci, group_values(&face, l, neig[li], pieces)));
                         }
                         out
                     })
@@ -638,6 +759,7 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
         let band_at = |i: usize| band_of[i];
         let mut shapes = Vec::new();
         let mut styles: Vec<String> = Vec::new();
+        let mut gesetzt: Vec<Vec<Pt>> = Vec::new();
         for (gi, g) in grp.iter().enumerate() {
             let Some(pi) = picks[gi] else { continue };
             let c = &cands[pi];
@@ -645,9 +767,9 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
                 Some(p) => std::borrow::Cow::Owned(std::fs::read(p).unwrap_or_default()),
                 None => std::borrow::Cow::Borrowed(INTER[c.src.1 as usize].0),
             };
-            let Ok(face) = ttf_parser::Face::parse(&data, if c.src.0.is_some() { c.src.1 } else { 0 }) else { continue };
+            let Some(face) = face_at(&data, if c.src.0.is_some() { c.src.1 } else { 0 }, c.wght) else { continue };
             let text: String = l.chars[g.0..g.1].iter().collect();
-            let gl = if g.1 - g.0 == 1 { glyph(&face, l.chars[g.0]) } else { glyph_run(&face, &text) };
+            let gl = schraeg(if g.1 - g.0 == 1 { glyph(&face, l.chars[g.0]) } else { glyph_run(&face, &text) }, neig[li]);
             if let (Some(gl), Some(p)) = (gl, pieces.get(&(g.2, g.3))) {
                 let mut ink = p.3;
                 if let Some((t, b)) = band_at(gi) {
@@ -665,11 +787,23 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
                 } else {
                     [ink[0], ink[1], iw, ih]
                 };
+                // für die Endkontrolle in Analysepixel der Zeile umrechnen
+                let rm = [rect[0] * l.sc - l.lx as f64, rect[1] * l.sc - l.ly as f64, rect[2] * l.sc, rect[3] * l.sc];
+                gesetzt.extend(polys(&gl, rm));
                 shapes.push(to_shape(&gl, rect));
                 if !styles.contains(&c.style) {
                     styles.push(c.style.clone());
                 }
             }
+        }
+        // Endkontrolle: deckt der gesetzte Schriftzug die Tinte im Bild wirklich ab?
+        // Sonst lieber als Fläche nachzeichnen (verrutschte oder doppelte Buchstaben).
+        let deckung = mask_iou(&l.lmask, l.lw, l.lh, &gesetzt);
+        if debug {
+            eprintln!("      Endkontrolle {fam}: Deckung {deckung:.2}");
+        }
+        if deckung < MIN_DECKUNG {
+            continue;
         }
         outs.push(TextOut { line: l.line.clone(), color: l.fg, shapes, erase: l.erase.clone() });
         matches.push(Match { text: l.line.text.clone(), family: fam, styles, score: val });

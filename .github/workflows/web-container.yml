@@ -12,6 +12,7 @@ on:
       - "tools/zmn-pruefstand/**"
       - "packaging/web/**"
       - "packaging/linux/**"
+      - "tools/schriften/**"
       - ".github/workflows/web-container.yml"
   workflow_dispatch:
 
