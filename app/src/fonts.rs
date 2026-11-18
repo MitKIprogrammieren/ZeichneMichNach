@@ -798,7 +798,12 @@ pub fn match_lines(lines: &[TextAnalysis], progress: &dyn Fn(f32)) -> (Vec<TextO
         }
         // Endkontrolle: deckt der gesetzte Schriftzug die Tinte im Bild wirklich ab?
         // Sonst lieber als Fläche nachzeichnen (verrutschte oder doppelte Buchstaben).
-        let deckung = mask_iou(&l.lmask, l.lw, l.lh, &gesetzt);
+        // auf feste Zeilenhöhe verkleinert prüfen, damit das Ergebnis nicht von der Auflösung abhängt
+        const PRUEF_H: usize = 72;
+        let f = (PRUEF_H as f64 / l.lh.max(1) as f64).min(1.0);
+        let (km, kw, kh) = shrink(&l.lmask, l.lw, l.lh, PRUEF_H);
+        let klein: Vec<Vec<Pt>> = gesetzt.iter().map(|poly| poly.iter().map(|p| [p[0] * f, p[1] * f]).collect()).collect();
+        let deckung = mask_iou(&km, kw, kh, &klein);
         if debug {
             eprintln!("      Endkontrolle {fam}: Deckung {deckung:.2}");
         }

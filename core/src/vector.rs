@@ -207,7 +207,9 @@ impl Doc {
 
     /// Stufe 0: Analysebild erzeugen (bis 4x hochgerechnet).
     pub fn rasterize(&mut self, o: &Opts) {
-        let max = o.res as f64;
+        // nie unter die Originalgröße verkleinern (bis 1600 px): feine Details und Schrift
+        // gingen sonst verloren; kleine Bilder werden wie bisher hochgerechnet
+        let max = (o.res as f64).max(self.src_w.max(self.src_h).min(1600) as f64);
         let sc = (max / self.src_w.max(self.src_h).max(1) as f64).min(4.0);
         let w = ((self.src_w as f64 * sc).round() as usize).max(1);
         let h = ((self.src_h as f64 * sc).round() as usize).max(1);

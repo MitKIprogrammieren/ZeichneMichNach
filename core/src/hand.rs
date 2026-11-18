@@ -1968,7 +1968,7 @@ pub fn finish(doc: &mut Doc, o: &Opts, k: usize, h: &HandOpts, texts: &[TextOut]
             eprintln!("    Bildart: Illustration");
         }
     }
-    let k = if illu && k == 0 { 40 } else { k };
+    let k = if illu && k == 0 { 64 } else { k };
     let mut text_px = vec![false; n];
     for t in texts {
         for &p in &t.erase {
